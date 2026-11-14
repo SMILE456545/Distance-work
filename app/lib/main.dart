@@ -115,7 +115,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
   Widget build(BuildContext context) {
     final wide = MediaQuery.of(context).size.width > 820;
     final hero = Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-      const KrakenWordmark(),
+      const KrakenBadge(size: 52, bg: K.ink, fg: K.white),
       SizedBox(height: wide ? 48 : 36),
       Text('Remote', style: K.h(wide ? 84 : 58)),
       Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
