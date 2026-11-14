@@ -143,3 +143,15 @@ Tailscale работает за любым провайдером, в том ч�
 Порты меняются там же (`https_port`, `rtc_port`).
 
 Ноутбук должен быть включён и не спать, а сервер RemoteDesk — запущен.
+
+---
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/kraken-white.png">
+    <img src="docs/brand/kraken-black.png" alt="Kraken Digital" width="72">
+  </picture>
+  <br>
+  <b>Kraken Digital</b><br>
+  <sub>Создано независимой компанией по разработке ПО Kraken Digital</sub>
+</p>
