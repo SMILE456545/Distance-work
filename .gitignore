@@ -1,0 +1,9 @@
+# secret access key — never commit
+server/config.json
+__pycache__/
+*.pyc
+
+# build outputs
+web/
+*.apk
+app/android/build/
