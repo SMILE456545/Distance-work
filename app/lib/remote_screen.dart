@@ -57,6 +57,8 @@ class _RemoteScreenState extends State<RemoteScreen> {
   TouchMode _mode = TouchMode.direct;
   bool _dragLock = false;
   bool _scrollMode = false;
+  bool _panelOpen = false;
+  Offset? _burgerPos; // null = bottom-right corner; the user can drag it anywhere
   final Map<int, Offset> _pointers = {};
   Offset? _start;
   DateTime _startTime = DateTime.now();
@@ -89,6 +91,9 @@ class _RemoteScreenState extends State<RemoteScreen> {
     _fpsTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted) setState(() => _fps = _framesThisSecond);
       _framesThisSecond = 0;
+    });
+    _kbFocus.addListener(() {
+      if (mounted) setState(() {});
     });
     _loop();
   }
@@ -375,8 +380,11 @@ class _RemoteScreenState extends State<RemoteScreen> {
       child: Column(
         children: [
           Expanded(child: _screen()),
-          if (_showKeys) _keysPanel(),
-          _toolbar(),
+          // the button panel is hidden behind the ☰ button so the screen stays free
+          if (_panelOpen && _showKeys) _keysPanel(),
+          if (_panelOpen) _toolbar(),
+          // key carousel right above the phone keyboard
+          if (_kbFocus.hasFocus) _kbCarousel(),
         ],
       ),
     );
@@ -431,6 +439,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
               ),
             ),
           ),
+          _burger(c.maxWidth, c.maxHeight),
           Positioned(
             left: 8,
             top: 8,
@@ -455,6 +464,9 @@ class _RemoteScreenState extends State<RemoteScreen> {
                 keyboardType: TextInputType.multiline,
                 maxLines: null,
                 onChanged: _onKbChanged,
+                // keep the keyboard open while tapping on the remote screen;
+                // it is closed with the keyboard button
+                onTapOutside: (_) {},
                 decoration: const InputDecoration(border: InputBorder.none, isCollapsed: true),
               ),
             ),
@@ -462,6 +474,35 @@ class _RemoteScreenState extends State<RemoteScreen> {
         ],
       );
     });
+  }
+
+  /// Round ☰ button over the picture: tap opens/closes the button panel, drag moves it.
+  Widget _burger(double w, double h) {
+    const size = 46.0;
+    final pos = _burgerPos ?? Offset(w - size - 12, h - size - 12);
+    final p = Offset(pos.dx.clamp(4.0, math.max(4.0, w - size - 4)), pos.dy.clamp(4.0, math.max(4.0, h - size - 4)));
+    return Positioned(
+      left: p.dx,
+      top: p.dy,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => setState(() => _panelOpen = !_panelOpen),
+        onPanUpdate: (d) => setState(() => _burgerPos = p + d.delta),
+        child: Tooltip(
+          message: _panelOpen ? 'Скрыть панель' : 'Открыть панель кнопок',
+          child: Container(
+            width: size,
+            height: size,
+            decoration: BoxDecoration(
+              color: _panelOpen ? const Color(0xFF3D8BFD).withValues(alpha: 0.85) : Colors.black.withValues(alpha: 0.55),
+              shape: BoxShape.circle,
+              border: Border.all(color: Colors.white24),
+            ),
+            child: Icon(_panelOpen ? Icons.close : Icons.menu, color: Colors.white, size: 24),
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _badge(String text, Color color) => Container(
@@ -571,6 +612,43 @@ class _RemoteScreenState extends State<RemoteScreen> {
         height: 44,
         child: ListView(scrollDirection: Axis.horizontal, padding: const EdgeInsets.symmetric(horizontal: 4), children: children),
       );
+
+  /// One scrollable row of keys shown while the phone keyboard is open.
+  /// TextFieldTapRegion keeps the keyboard open when these keys are tapped.
+  Widget _kbCarousel() {
+    return TextFieldTapRegion(
+      child: Container(
+        color: const Color(0xFF15191E),
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: _row([
+          _chip('Enter ⏎', () => _key(['enter'])),
+          _chip('⌫', () => _key(['backspace'])),
+          _chip('Esc', () => _key(['esc'])),
+          _chip('Tab', () => _key(['tab'])),
+          _chip('←', () => _key(['left'])),
+          _chip('→', () => _key(['right'])),
+          _chip('↑', () => _key(['up'])),
+          _chip('↓', () => _key(['down'])),
+          _mod('ctrl', 'Ctrl'),
+          _mod('alt', 'Alt'),
+          _mod('shift', 'Shift'),
+          _mod('win', 'Win'),
+          _chip('Del', () => _key(['delete'])),
+          _chip('Копировать', () => _key(['ctrl', 'c'])),
+          _chip('Вставить', () => _key(['ctrl', 'v'])),
+          _chip('Отменить', () => _key(['ctrl', 'z'])),
+          _chip('Выделить всё', () => _key(['ctrl', 'a'])),
+          _chip('Сохранить', () => _key(['ctrl', 's'])),
+          _chip('Home', () => _key(['home'])),
+          _chip('End', () => _key(['end'])),
+          _chip('Alt+Tab', () => _key(['alt', 'tab'])),
+          _chip('Смена языка', () => _key(['alt', 'shift'])),
+          _chip('F5', () => _key(['f5'])),
+          _chip('Пуск', () => _key(['win'])),
+        ]),
+      ),
+    );
+  }
 
   Widget _keysPanel() {
     return Container(

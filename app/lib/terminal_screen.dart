@@ -85,6 +85,48 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
   void initState() {
     super.initState();
     _ctrl.addListener(_updateHint);
+    _focus.addListener(() {
+      if (mounted) setState(() {});
+    });
+  }
+
+  /// Commands shown in the carousel above the keyboard.
+  /// Ending with a space = needs a word after it, so it is only inserted.
+  static const _quick = [
+    'помощь', 'открытые', 'закрыть ', 'открыть ', 'проекты', 'перейти ', 'файлы',
+    'папка', 'vscode ', 'claude ', 'спроси ', 'unity', 'cd ..', 'программы', 'очистить',
+  ];
+
+  Widget _cmdCarousel() {
+    final recent = _history.reversed.take(5).toList();
+    Widget chip(String label, {bool past = false}) => Padding(
+          padding: const EdgeInsets.only(right: 6),
+          child: ActionChip(
+            avatar: past ? const Icon(Icons.history, size: 14) : null,
+            label: Text(label.trim(), style: _mono.copyWith(fontSize: 12, color: past ? Colors.white70 : _green)),
+            visualDensity: VisualDensity.compact,
+            onPressed: () {
+              if (label.endsWith(' ')) {
+                _insert(label); // needs a name/number after it
+              } else {
+                _run(label);
+              }
+            },
+          ),
+        );
+    return TextFieldTapRegion(
+      child: SizedBox(
+        height: 40,
+        child: ListView(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.only(bottom: 4),
+          children: [
+            for (final c in recent) chip(c, past: true),
+            for (final c in _quick) chip(c),
+          ],
+        ),
+      ),
+    );
   }
 
   void _updateHint() {
@@ -488,6 +530,7 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
                 child: Text(_cwd, style: _mono.copyWith(fontSize: 11, color: _green), overflow: TextOverflow.ellipsis),
               ),
             ]),
+            if (_focus.hasFocus) Padding(padding: const EdgeInsets.only(top: 4), child: _cmdCarousel()),
             if (_hint.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.only(top: 4),
@@ -514,8 +557,7 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
                     onSubmitted: (t) {
                       _run(t);
                       _focus.requestFocus();
-                    },
-                    decoration: const InputDecoration(
+                    },                    decoration: const InputDecoration(
                       hintText: 'Команда… например: помощь',
                       border: InputBorder.none,
                       isDense: true,
