@@ -8,6 +8,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import 'api.dart';
+import 'kraken/kraken.dart';
+import 'main.dart' show homeTabs;
 
 enum TouchMode { direct, touchpad }
 
@@ -30,7 +32,10 @@ class RemoteScreen extends StatefulWidget {
   final Api api;
   final ServerInfo info;
   final bool active;
-  const RemoteScreen({super.key, required this.api, required this.info, required this.active});
+  final int tab;
+  final ValueChanged<int> onTab;
+  const RemoteScreen(
+      {super.key, required this.api, required this.info, required this.active, required this.tab, required this.onTab});
 
   @override
   State<RemoteScreen> createState() => _RemoteScreenState();
@@ -72,8 +77,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
   TouchMode _mode = TouchMode.direct;
   bool _dragLock = false;
   bool _scrollMode = false;
-  bool _panelOpen = false;
-  Offset? _burgerPos; // null = bottom-right corner; the user can drag it anywhere
+  bool _panelOpen = true; // the dock's button grid; collapsed = just the tabs
   final Map<int, Offset> _pointers = {};
   Offset? _start;
   DateTime _startTime = DateTime.now();
@@ -556,17 +560,29 @@ class _RemoteScreenState extends State<RemoteScreen> {
   // ------------------------------------------------------------ UI
   @override
   Widget build(BuildContext context) {
-    return SafeArea(
-      bottom: false,
-      child: Column(
-        children: [
-          Expanded(child: _screen()),
-          // the button panel is hidden behind the ☰ button so the screen stays free
-          if (_panelOpen && _showKeys) _keysPanel(),
-          if (_panelOpen) _toolbar(),
-          // key carousel right above the phone keyboard
-          if (_kbFocus.hasFocus) _kbCarousel(),
-        ],
+    return Container(
+      color: K.ink,
+      child: SafeArea(
+        bottom: false,
+        child: Column(
+          children: [
+            Expanded(child: _screen()),
+            if (_kbFocus.hasFocus)
+              // key carousel right above the phone keyboard
+              _kbCarousel()
+            else ...[
+              if (_panelOpen && _showKeys) _keysPanel(),
+              KrakenDock(
+                tabs: homeTabs,
+                tab: widget.tab,
+                onTab: widget.onTab,
+                actions: _actions(),
+                expanded: _panelOpen,
+                onToggle: () => setState(() => _panelOpen = !_panelOpen),
+              ),
+            ],
+          ],
+        ),
       ),
     );
   }
@@ -588,7 +604,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
               onPointerSignal: _onSignal,
               child: ClipRect(
                 child: Container(
-                  color: Colors.black,
+                  color: K.ink,
                   child: Transform(
                     transform: Matrix4.identity()
                       ..translateByDouble(_offset.dx, _offset.dy, 0, 1)
@@ -601,7 +617,13 @@ class _RemoteScreenState extends State<RemoteScreen> {
                                 objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
                                 filterQuality: FilterQuality.medium)
                             : _base == null
-                            ? const Center(child: CircularProgressIndicator())
+                            ? Center(
+                                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                                  const KrakenLogo(size: 64, color: K.lilac),
+                                  const SizedBox(height: 14),
+                                  Text('Подключаю экран…', style: K.t(14, color: K.muted)),
+                                ]),
+                              )
                             : Stack(children: [
                                 Positioned.fill(
                                   child: Image(image: _base!, gaplessPlayback: true, fit: BoxFit.fill,
@@ -624,14 +646,15 @@ class _RemoteScreenState extends State<RemoteScreen> {
               ),
             ),
           ),
-          _burger(c.maxWidth, c.maxHeight),
           Positioned(
-            left: 8,
-            top: 8,
-            child: _badge(_offline
-                ? 'Нет связи…'
-                : '${widget.info.name} · $_fps к/с${_rtcOn ? ' · видео' : ''}${_scale > 1 ? ' · ×${_scale.toStringAsFixed(1)}' : ''}',
-                _offline ? const Color(0xFFFF7B72) : Colors.white70),
+            left: 10,
+            top: 10,
+            child: IgnorePointer(
+              child: _badge(_offline
+                  ? 'Нет связи…'
+                  : '${widget.info.name} · $_fps к/с${_rtcOn ? ' · видео' : ''}${_scale > 1 ? ' · ×${_scale.toStringAsFixed(1)}' : ''}',
+                  _offline),
+            ),
           ),
           // hidden text field that receives the phone keyboard
           Positioned(
@@ -661,113 +684,59 @@ class _RemoteScreenState extends State<RemoteScreen> {
     });
   }
 
-  /// Round ☰ button over the picture: tap opens/closes the button panel, drag moves it.
-  Widget _burger(double w, double h) {
-    const size = 46.0;
-    final pos = _burgerPos ?? Offset(w - size - 12, h - size - 12);
-    final p = Offset(pos.dx.clamp(4.0, math.max(4.0, w - size - 4)), pos.dy.clamp(4.0, math.max(4.0, h - size - 4)));
-    return Positioned(
-      left: p.dx,
-      top: p.dy,
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: () => setState(() => _panelOpen = !_panelOpen),
-        onPanUpdate: (d) => setState(() => _burgerPos = p + d.delta),
-        child: Tooltip(
-          message: _panelOpen ? 'Скрыть панель' : 'Открыть панель кнопок',
-          child: Container(
-            width: size,
-            height: size,
-            decoration: BoxDecoration(
-              color: _panelOpen ? const Color(0xFF3D8BFD).withValues(alpha: 0.85) : Colors.black.withValues(alpha: 0.55),
-              shape: BoxShape.circle,
-              border: Border.all(color: Colors.white24),
-            ),
-            child: Icon(_panelOpen ? Icons.close : Icons.menu, color: Colors.white, size: 24),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _badge(String text, Color color) => Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(8)),
-        child: Text(text, style: TextStyle(fontSize: 12, color: color)),
-      );
-
-  Widget _toolBtn(IconData icon, String tip, VoidCallback onTap, {bool on = false}) => Tooltip(
-        message: tip,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(10),
-          onTap: onTap,
-          child: Container(
-            width: 44,
-            height: 40,
-            decoration: BoxDecoration(
-              color: on ? const Color(0xFF3D8BFD).withValues(alpha: 0.25) : null,
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Icon(icon, size: 22, color: on ? const Color(0xFF8AB8FF) : Colors.white70),
-          ),
-        ),
-      );
-
-  Widget _toolbar() {
-    return Container(
-      color: const Color(0xFF1A1E24),
-      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Row(children: [
-          _toolBtn(Icons.keyboard, 'Клавиатура', _toggleKeyboard, on: _kbFocus.hasFocus),
-          _toolBtn(Icons.keyboard_command_key, 'Спец. клавиши', () => setState(() => _showKeys = !_showKeys),
-              on: _showKeys),
-          _toolBtn(_mode == TouchMode.direct ? Icons.touch_app : Icons.mouse,
-              _mode == TouchMode.direct ? 'Режим: касание' : 'Режим: тачпад', () {
-            setState(() => _mode = _mode == TouchMode.direct ? TouchMode.touchpad : TouchMode.direct);
-            _snack(_mode == TouchMode.direct
-                ? 'Касание: нажимайте прямо на нужное место'
-                : 'Тачпад: водите пальцем, курсор двигается как на ноутбуке');
-          }),
-          _toolBtn(Icons.pan_tool_alt, 'Перетаскивание (зажать ЛКМ)', () {
-            setState(() => _dragLock = !_dragLock);
-            _snack(_dragLock ? 'Перетаскивание включено: ведите пальцем, чтобы тянуть' : 'Перетаскивание выключено');
-          }, on: _dragLock),
-          _toolBtn(Icons.swap_vert, 'Прокрутка пальцем', () {
-            setState(() {
-              _scrollMode = !_scrollMode;
-              if (_scrollMode) _dragLock = false;
-            });
-            _snack(_scrollMode
-                ? 'Прокрутка: ведите пальцем вверх/вниз, чтобы листать. Нажатия работают как обычно'
-                : 'Прокрутка выключена');
-          }, on: _scrollMode),
-          _toolBtn(Icons.ads_click,'Правый клик (или долгое нажатие)', () => _send({'t': 'click', 'b': 'right'})),
-          _toolBtn(Icons.zoom_out_map, 'Сбросить масштаб', () => setState(() {
-                _scale = 1;
-                _offset = Offset.zero;
-              })),
-          _toolBtn(Icons.high_quality, 'Качество: ${_qualities[_quality].label}', () {
-            setState(() {
-              _quality = (_quality + 1) % _qualities.length;
-            });
-            _sendQuality();
-            _snack('Качество: ${_qualities[_quality].label}');
-          }),
-          if (widget.info.monitors.length > 1)
-            _toolBtn(Icons.monitor, 'Монитор ${_monitor + 1}', () {
-              setState(() {
-                _monitor = (_monitor + 1) % widget.info.monitors.length;
-              });
-              _sendQuality();
-              _snack('Монитор ${_monitor + 1}');
-            }),
-          _toolBtn(Icons.logout, 'Отключиться', () => Navigator.of(context).pop()),
+  Widget _badge(String text, bool bad) => Container(
+        padding: const EdgeInsets.fromLTRB(10, 6, 12, 6),
+        decoration: BoxDecoration(color: K.ink.withValues(alpha: 0.72), borderRadius: BorderRadius.circular(30)),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Container(
+              width: 8, height: 8, decoration: BoxDecoration(color: bad ? K.coral : K.lime, shape: BoxShape.circle)),
+          const SizedBox(width: 7),
+          Text(text, style: K.t(12, color: bad ? K.coral : K.white, w: FontWeight.w600)),
         ]),
-      ),
-    );
-  }
+      );
+
+  List<DockAction> _actions() => [
+        DockAction(Icons.keyboard_rounded, 'Клавиатура', _toggleKeyboard, on: _kbFocus.hasFocus),
+        DockAction(Icons.keyboard_command_key_rounded, 'Клавиши', () => setState(() => _showKeys = !_showKeys),
+            on: _showKeys),
+        DockAction(_mode == TouchMode.direct ? Icons.touch_app_rounded : Icons.mouse_rounded,
+            _mode == TouchMode.direct ? 'Касание' : 'Тачпад', () {
+          setState(() => _mode = _mode == TouchMode.direct ? TouchMode.touchpad : TouchMode.direct);
+          _snack(_mode == TouchMode.direct
+              ? 'Касание: нажимайте прямо на нужное место'
+              : 'Тачпад: водите пальцем, курсор двигается как на ноутбуке');
+        }),
+        DockAction(Icons.pan_tool_alt_rounded, 'Тянуть', () {
+          setState(() => _dragLock = !_dragLock);
+          _snack(_dragLock ? 'Перетаскивание включено: ведите пальцем, чтобы тянуть' : 'Перетаскивание выключено');
+        }, on: _dragLock),
+        DockAction(Icons.swap_vert_rounded, 'Прокрутка', () {
+          setState(() {
+            _scrollMode = !_scrollMode;
+            if (_scrollMode) _dragLock = false;
+          });
+          _snack(_scrollMode
+              ? 'Прокрутка: ведите пальцем вверх/вниз, чтобы листать. Нажатия работают как обычно'
+              : 'Прокрутка выключена');
+        }, on: _scrollMode),
+        DockAction(Icons.ads_click_rounded, 'ПКМ', () => _send({'t': 'click', 'b': 'right'})),
+        DockAction(Icons.zoom_out_map_rounded, '1:1', () => setState(() {
+              _scale = 1;
+              _offset = Offset.zero;
+            })),
+        DockAction(Icons.high_quality_rounded, _qualities[_quality].label, () {
+          setState(() => _quality = (_quality + 1) % _qualities.length);
+          _sendQuality();
+          _snack('Качество: ${_qualities[_quality].label}');
+        }),
+        if (widget.info.monitors.length > 1)
+          DockAction(Icons.monitor_rounded, 'Монитор ${_monitor + 1}', () {
+            setState(() => _monitor = (_monitor + 1) % widget.info.monitors.length);
+            _sendQuality();
+            _snack('Монитор ${_monitor + 1}');
+          }),
+        DockAction(Icons.logout_rounded, 'Выйти', () => Navigator.of(context).pop()),
+      ];
 
   void _snack(String s) {
     ScaffoldMessenger.of(context)
@@ -777,18 +746,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
 
   Widget _chip(String label, VoidCallback onTap, {bool on = false}) => Padding(
         padding: const EdgeInsets.symmetric(horizontal: 3),
-        child: Material(
-          color: on ? const Color(0xFF3D8BFD) : const Color(0xFF2A303A),
-          borderRadius: BorderRadius.circular(8),
-          child: InkWell(
-            borderRadius: BorderRadius.circular(8),
-            onTap: onTap,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-              child: Text(label, style: const TextStyle(fontSize: 13)),
-            ),
-          ),
-        ),
+        child: KChip(label, onTap: onTap, bg: on ? K.lime : K.panel2, fg: on ? K.ink : K.white),
       );
 
   Widget _mod(String name, String label) => _chip(label, () {
@@ -805,8 +763,8 @@ class _RemoteScreenState extends State<RemoteScreen> {
   Widget _kbCarousel() {
     return TextFieldTapRegion(
       child: Container(
-        color: const Color(0xFF15191E),
-        padding: const EdgeInsets.symmetric(vertical: 4),
+        color: K.ink,
+        padding: const EdgeInsets.symmetric(vertical: 6),
         child: _row([
           _chip('Enter ⏎', () => _key(['enter'])),
           _chip('⌫', () => _key(['backspace'])),
@@ -839,8 +797,9 @@ class _RemoteScreenState extends State<RemoteScreen> {
 
   Widget _keysPanel() {
     return Container(
-      color: const Color(0xFF15191E),
-      padding: const EdgeInsets.symmetric(vertical: 4),
+      margin: const EdgeInsets.fromLTRB(10, 6, 10, 0),
+      padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
+      decoration: BoxDecoration(color: K.panel, borderRadius: BorderRadius.circular(26), border: Border.all(color: K.line)),
       child: Column(children: [
         _row([
           _mod('ctrl', 'Ctrl'),

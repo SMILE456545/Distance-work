@@ -4,7 +4,7 @@ __pycache__/
 *.pyc
 
 # build outputs
-web/
+/web/
 *.apk
 app/android/build/
 

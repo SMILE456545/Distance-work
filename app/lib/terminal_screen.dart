@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'api.dart';
+import 'kraken/kraken.dart';
+import 'main.dart' show homeTabs;
 
 class _Entry {
   final String cwd;
@@ -11,8 +13,18 @@ class _Entry {
   _Entry(this.cwd, this.cmd);
 }
 
-const _green = Color(0xFF7EE787);
-const _blue = Color(0xFF8AB8FF);
+const _green = K.lime;
+const _blue = K.lilac;
+
+/// Colors of the quick-launch chips, in turn (like the colorful tags in the references).
+const _chipColors = [
+  (K.white, K.ink),
+  (K.lilac, K.ink),
+  (K.yellow, K.ink),
+  (K.panel2, K.white),
+  (K.lime, K.ink),
+  (K.coral, K.ink),
+];
 
 /// Quick-launch buttons. Each one just types its command, so the user sees
 /// (and learns) what to write next time.
@@ -61,7 +73,9 @@ const _hints = <String, String>{
 class TerminalScreen extends StatefulWidget {
   final Api api;
   final ServerInfo info;
-  const TerminalScreen({super.key, required this.api, required this.info});
+  final int tab;
+  final ValueChanged<int> onTab;
+  const TerminalScreen({super.key, required this.api, required this.info, required this.tab, required this.onTab});
 
   @override
   State<TerminalScreen> createState() => _TerminalScreenState();
@@ -77,6 +91,7 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
   late String _cwd = widget.info.home;
   bool _busy = false;
   String _hint = '';
+  bool _dockOpen = true;
 
   @override
   bool get wantKeepAlive => true;
@@ -101,11 +116,12 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
     final recent = _history.reversed.take(5).toList();
     Widget chip(String label, {bool past = false}) => Padding(
           padding: const EdgeInsets.only(right: 6),
-          child: ActionChip(
-            avatar: past ? const Icon(Icons.history, size: 14) : null,
-            label: Text(label.trim(), style: _mono.copyWith(fontSize: 12, color: past ? Colors.white70 : _green)),
-            visualDensity: VisualDensity.compact,
-            onPressed: () {
+          child: KChip(
+            label.trim(),
+            icon: past ? Icons.history : null,
+            style: _mono.copyWith(fontSize: 12, color: past ? Colors.white70 : _green),
+            fg: Colors.white70,
+            onTap: () {
               if (label.endsWith(' ')) {
                 _insert(label); // needs a name/number after it
               } else {
@@ -192,15 +208,13 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
     _insert(t);
   }
 
-  static const _mono = TextStyle(
-      fontFamily: 'monospace', fontFamilyFallback: ['Consolas', 'Courier New', 'Menlo'], fontSize: 13, height: 1.35);
+  static final _mono = K.code(13);
 
   // ------------------------------------------------------------ guide
   void _showGuide() {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      backgroundColor: const Color(0xFF15191E),
       builder: (ctx) => DraggableScrollableSheet(
         expand: false,
         initialChildSize: 0.85,
@@ -210,10 +224,11 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
           padding: const EdgeInsets.fromLTRB(20, 8, 20, 32),
           children: [
             Center(
-              child: Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2))),
+              child: Container(width: 44, height: 5, decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2))),
             ),
             const SizedBox(height: 16),
-            const Text('Как пользоваться терминалом', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600)),
+            Text('Как пользоваться', style: K.h(26)),
+            Text('терминалом', style: K.accent(26, color: K.lilac)),
             const SizedBox(height: 8),
             const Text(
               'Пишите команду внизу и нажимайте ➤. Команды выполняются на ноутбуке, а ответ появляется здесь. '
@@ -277,7 +292,7 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
   Widget _section(String title, List<(String, String)> rows, BuildContext ctx) => Padding(
         padding: const EdgeInsets.only(top: 20),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(title, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: _blue)),
+          Text(title, style: K.t(15, w: FontWeight.w700, color: _blue)),
           const SizedBox(height: 6),
           for (final (cmd, what) in rows)
             InkWell(
@@ -291,7 +306,7 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
                 child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                    decoration: BoxDecoration(color: const Color(0xFF0C0E11), borderRadius: BorderRadius.circular(6)),
+                    decoration: BoxDecoration(color: K.ink, borderRadius: BorderRadius.circular(10)),
                     child: Text(cmd, style: _mono.copyWith(color: _green)),
                   ),
                   const SizedBox(width: 10),
@@ -320,7 +335,6 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      backgroundColor: const Color(0xFF15191E),
       builder: (ctx) => DraggableScrollableSheet(
         expand: false,
         initialChildSize: 0.75,
@@ -329,33 +343,32 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
           controller: sc,
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
           children: [
-            const Text('Папки и проекты', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600)),
+            Row(children: [
+              Text('Папки и ', style: K.h(26)),
+              Text('проекты', style: K.accent(26, color: K.lilac)),
+            ]),
             const SizedBox(height: 4),
             const Text('Нажмите действие — в терминале будет видно, какая команда это делает.',
                 style: TextStyle(color: Colors.white54, fontSize: 13)),
             const SizedBox(height: 8),
             for (final p in list)
-              Card(
-                color: const Color(0xFF1E232B),
+              Container(
+                decoration: BoxDecoration(color: K.panel2, borderRadius: BorderRadius.circular(24)),
                 margin: const EdgeInsets.symmetric(vertical: 5),
                 child: Padding(
-                  padding: const EdgeInsets.fromLTRB(14, 10, 10, 8),
+                  padding: const EdgeInsets.fromLTRB(16, 14, 12, 12),
                   child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                     Row(children: [
-                      Text('${p.n}. ', style: const TextStyle(color: Colors.white54)),
+                      Text('${p.n}  ', style: K.h(15, color: K.lilac)),
                       Expanded(
-                        child: Text(p.name, style: const TextStyle(fontWeight: FontWeight.w600), overflow: TextOverflow.ellipsis),
+                        child: Text(p.name, style: K.t(15, w: FontWeight.w700), overflow: TextOverflow.ellipsis),
                       ),
                       if (p.unity)
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                          decoration: BoxDecoration(color: Colors.white12, borderRadius: BorderRadius.circular(6)),
-                          child: const Text('Unity', style: TextStyle(fontSize: 11)),
-                        ),
+                        const KTag('UNITY', bg: K.yellow),
                     ]),
                     Text(p.path, style: const TextStyle(color: Colors.white38, fontSize: 11), overflow: TextOverflow.ellipsis),
-                    const SizedBox(height: 6),
-                    Wrap(spacing: 6, runSpacing: 4, children: [
+                    const SizedBox(height: 10),
+                    Wrap(spacing: 6, runSpacing: 6, children: [
                       _act(ctx, 'Перейти', 'перейти ${p.n}'),
                       _act(ctx, 'Проводник', 'папка ${p.n}'),
                       _act(ctx, 'VS Code', 'vscode ${p.n}'),
@@ -371,10 +384,11 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
     );
   }
 
-  Widget _act(BuildContext ctx, String label, String cmd) => ActionChip(
-        label: Text(label, style: const TextStyle(fontSize: 12)),
-        visualDensity: VisualDensity.compact,
-        onPressed: () {
+  Widget _act(BuildContext ctx, String label, String cmd) => KChip(
+        label,
+        bg: label == 'Перейти' ? K.white : K.ink,
+        fg: label == 'Перейти' ? K.ink : K.white,
+        onTap: () {
           Navigator.pop(ctx);
           _run(cmd);
         },
@@ -384,12 +398,12 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
   Widget _welcome() => ListView(
         padding: const EdgeInsets.all(20),
         children: [
-          const Text('Терминал ноутбука', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+          Text('С чего начать', style: K.h(22)),
           const SizedBox(height: 8),
-          const Text(
+          Text(
             'Здесь можно открывать программы, папки и проекты простыми словами. '
             'Нажмите на пример или кнопку сверху.',
-            style: TextStyle(color: Colors.white60, height: 1.4),
+            style: K.t(14, color: K.muted, height: 1.4),
           ),
           const SizedBox(height: 16),
           for (final (cmd, what) in const [
@@ -407,140 +421,87 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
               padding: const EdgeInsets.symmetric(vertical: 4),
               child: InkWell(
                 onTap: () => _insert(cmd),
-                borderRadius: BorderRadius.circular(8),
-                child: Padding(
-                  padding: const EdgeInsets.all(6),
+                borderRadius: BorderRadius.circular(18),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+                  decoration: BoxDecoration(color: K.panel, borderRadius: BorderRadius.circular(18)),
                   child: Row(children: [
-                    Text(cmd, style: _mono.copyWith(color: _green)),
+                    Text(cmd, style: _mono.copyWith(color: _green, fontWeight: FontWeight.w700)),
                     const SizedBox(width: 10),
-                    Expanded(child: Text('— $what', style: const TextStyle(color: Colors.white54, fontSize: 13))),
+                    Expanded(child: Text(what, style: K.t(13, color: K.muted))),
+                    const Icon(Icons.north_east_rounded, size: 16, color: K.muted),
                   ]),
                 ),
               ),
             ),
           const SizedBox(height: 16),
-          Center(
-            child: OutlinedButton.icon(
-              onPressed: _showGuide,
-              icon: const Icon(Icons.help_outline),
-              label: const Text('Подробная инструкция'),
-            ),
-          ),
+          KPillButton('Подробная инструкция', onPressed: _showGuide, bg: K.lilac),
         ],
       );
 
-  @override
-  Widget build(BuildContext context) {
-    super.build(context);
-    return SafeArea(
-      bottom: false,
-      child: Column(children: [
-        Container(
-          width: double.infinity,
-          color: const Color(0xFF1A1E24),
-          padding: const EdgeInsets.fromLTRB(14, 4, 4, 4),
-          child: Row(children: [
-            const Icon(Icons.terminal, size: 18, color: Colors.white60),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(widget.info.name, style: const TextStyle(fontWeight: FontWeight.w600), overflow: TextOverflow.ellipsis),
-            ),
-            TextButton.icon(
-              onPressed: _showProjects,
-              icon: const Icon(Icons.folder_special_outlined, size: 18),
-              label: const Text('Проекты'),
-            ),
-            IconButton(tooltip: 'Инструкция', icon: const Icon(Icons.help_outline, size: 22), onPressed: _showGuide),
-            IconButton(
-              tooltip: 'Очистить',
-              icon: const Icon(Icons.delete_sweep_outlined, size: 20),
-              onPressed: () => setState(_log.clear),
-            ),
-          ]),
-        ),
-        SizedBox(
-          height: 46,
-          child: ListView(
-            scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-            children: [
-              for (final (icon, label, cmd) in _apps)
-                Padding(
-                  padding: const EdgeInsets.only(right: 6),
-                  child: ActionChip(
-                    avatar: Icon(icon, size: 16),
-                    label: Text(label, style: const TextStyle(fontSize: 12)),
-                    visualDensity: VisualDensity.compact,
-                    onPressed: () => _run(cmd),
-                  ),
-                ),
-            ],
+  Widget _logView() => _log.isEmpty
+      ? _welcome()
+      : SelectionArea(
+          child: ListView.builder(
+            controller: _scroll,
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+            itemCount: _log.length,
+            itemBuilder: (_, i) {
+              final e = _log[i];
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 14),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text.rich(TextSpan(children: [
+                    TextSpan(text: 'PS ${e.cwd}> ', style: _mono.copyWith(color: _green)),
+                    TextSpan(text: e.cmd, style: _mono.copyWith(color: K.white, fontWeight: FontWeight.w700)),
+                  ])),
+                  if (e.output == null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Row(children: [
+                        const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)),
+                        if (e.cmd.toLowerCase().startsWith('спроси'))
+                          Padding(
+                            padding: const EdgeInsets.only(left: 8),
+                            child: Text('Claude думает… это может занять пару минут', style: K.t(12, color: K.muted)),
+                          ),
+                      ]),
+                    )
+                  else if (e.output!.isNotEmpty)
+                    Text(e.output!, style: _mono.copyWith(color: e.error ? K.coral : const Color(0xFFCFCFDA))),
+                ]),
+              );
+            },
           ),
-        ),
-        Expanded(
-          child: Container(
-            color: const Color(0xFF0C0E11),
-            child: _log.isEmpty
-                ? _welcome()
-                : SelectionArea(
-                    child: ListView.builder(
-                      controller: _scroll,
-                      padding: const EdgeInsets.all(12),
-                      itemCount: _log.length,
-                      itemBuilder: (_, i) {
-                        final e = _log[i];
-                        return Padding(
-                          padding: const EdgeInsets.only(bottom: 12),
-                          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                            Text.rich(TextSpan(children: [
-                              TextSpan(text: 'PS ${e.cwd}> ', style: _mono.copyWith(color: _green)),
-                              TextSpan(text: e.cmd, style: _mono.copyWith(color: Colors.white)),
-                            ])),
-                            if (e.output == null)
-                              Padding(
-                                padding: const EdgeInsets.only(top: 6),
-                                child: Row(children: [
-                                  const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)),
-                                  if (e.cmd.toLowerCase().startsWith('спроси'))
-                                    const Padding(
-                                      padding: EdgeInsets.only(left: 8),
-                                      child: Text('Claude думает… это может занять пару минут',
-                                          style: TextStyle(color: Colors.white38, fontSize: 12)),
-                                    ),
-                                ]),
-                              )
-                            else if (e.output!.isNotEmpty)
-                              Text(e.output!,
-                                  style: _mono.copyWith(color: e.error ? const Color(0xFFFF7B72) : Colors.white70)),
-                          ]),
-                        );
-                      },
-                    ),
-                  ),
-          ),
-        ),
-        Container(
-          color: const Color(0xFF1A1E24),
-          padding: const EdgeInsets.fromLTRB(10, 6, 6, 6),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Row(children: [
-              const Icon(Icons.folder_outlined, size: 13, color: _green),
-              const SizedBox(width: 4),
+        );
+
+  Widget _inputBar() => Padding(
+        padding: const EdgeInsets.fromLTRB(10, 4, 10, 10),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(8, 0, 8, 6),
+            child: Row(children: [
+              const Icon(Icons.folder_rounded, size: 13, color: _green),
+              const SizedBox(width: 5),
               Expanded(
                 child: Text(_cwd, style: _mono.copyWith(fontSize: 11, color: _green), overflow: TextOverflow.ellipsis),
               ),
             ]),
-            if (_focus.hasFocus) Padding(padding: const EdgeInsets.only(top: 4), child: _cmdCarousel()),
-            if (_hint.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 4),
-                child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  const Icon(Icons.lightbulb_outline, size: 14, color: Color(0xFFE3B341)),
-                  const SizedBox(width: 4),
-                  Expanded(child: Text(_hint, style: const TextStyle(fontSize: 12, color: Color(0xFFE3B341)))),
-                ]),
-              ),
-            Row(children: [
+          ),
+          if (_focus.hasFocus) Padding(padding: const EdgeInsets.only(bottom: 6), child: _cmdCarousel()),
+          if (_hint.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 0, 8, 6),
+              child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                const Icon(Icons.lightbulb_rounded, size: 14, color: K.yellow),
+                const SizedBox(width: 5),
+                Expanded(child: Text(_hint, style: K.t(12, color: K.yellow, height: 1.3))),
+              ]),
+            ),
+          Container(
+            padding: const EdgeInsets.fromLTRB(18, 4, 5, 4),
+            decoration: BoxDecoration(color: K.panel2, borderRadius: BorderRadius.circular(30)),
+            child: Row(children: [
               Expanded(
                 child: CallbackShortcuts(
                   bindings: {
@@ -550,36 +511,122 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
                   child: TextField(
                     controller: _ctrl,
                     focusNode: _focus,
-                    style: _mono,
+                    style: _mono.copyWith(fontSize: 14),
                     autocorrect: false,
                     enableSuggestions: false,
                     textInputAction: TextInputAction.send,
                     onSubmitted: (t) {
                       _run(t);
                       _focus.requestFocus();
-                    },                    decoration: const InputDecoration(
+                    },
+                    decoration: InputDecoration(
                       hintText: 'Команда… например: помощь',
+                      hintStyle: K.t(14, color: const Color(0xFF6A6A78)),
                       border: InputBorder.none,
                       isDense: true,
                     ),
                   ),
                 ),
               ),
-              IconButton(
-                tooltip: 'Прошлая команда',
-                icon: const Icon(Icons.history, size: 20),
-                onPressed: () => _histStep(-1),
-              ),
-              IconButton.filled(
-                icon: _busy
-                    ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
-                    : const Icon(Icons.send, size: 18),
-                onPressed: _busy ? null : () => _run(_ctrl.text),
+              KRound(
+                _busy ? Icons.hourglass_top_rounded : Icons.arrow_upward_rounded,
+                tip: 'Выполнить',
+                size: 44,
+                bg: K.yellow,
+                fg: K.ink,
+                onTap: _busy ? null : () => _run(_ctrl.text),
               ),
             ]),
-          ]),
-        ),
-      ]),
+          ),
+        ]),
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    final mq = MediaQuery.of(context);
+    final keyboard = mq.viewInsets.bottom > 0;
+    final landscape = mq.size.width > mq.size.height;
+    return KrakenBackground(
+      scene: KrakenScene.calm,
+      animate: false,
+      child: SafeArea(
+        bottom: false,
+        child: Column(children: [
+          if (!(keyboard && landscape))
+            Padding(
+              padding: const EdgeInsets.fromLTRB(18, 12, 18, 10),
+              child: Row(children: [
+                const KrakenBadge(size: 44, bg: K.ink, fg: K.white),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text('Терминал', style: K.h(26)),
+                    const SizedBox(height: 3),
+                    Text(widget.info.name, style: K.accent(14), overflow: TextOverflow.ellipsis),
+                  ]),
+                ),
+                const KTag('ONLINE'),
+              ]),
+            ),
+          if (!keyboard)
+            SizedBox(
+              height: 44,
+              child: ListView(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 14),
+                children: [
+                  for (var i = 0; i < _apps.length; i++)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 7, bottom: 4),
+                      child: KChip(
+                        _apps[i].$2,
+                        icon: _apps[i].$1,
+                        bg: _chipColors[i % _chipColors.length].$1,
+                        fg: _chipColors[i % _chipColors.length].$2,
+                        onTap: () => _run(_apps[i].$3),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+              child: Container(
+                clipBehavior: Clip.antiAlias,
+                decoration: BoxDecoration(
+                  color: K.ink,
+                  borderRadius: BorderRadius.circular(32),
+                  boxShadow: const [BoxShadow(color: Color(0x55180F70), blurRadius: 30, offset: Offset(0, 12))],
+                ),
+                child: Column(children: [
+                  Expanded(child: _logView()),
+                  _inputBar(),
+                ]),
+              ),
+            ),
+          ),
+          if (!keyboard)
+            KrakenDock(
+              tabs: homeTabs,
+              tab: widget.tab,
+              onTab: widget.onTab,
+              actions: [
+                DockAction(Icons.folder_special_rounded, 'Проекты', _showProjects),
+                DockAction(Icons.help_rounded, 'Помощь', _showGuide),
+                DockAction(Icons.history_rounded, 'Прошлая', () => _histStep(-1)),
+                DockAction(Icons.delete_sweep_rounded, 'Очистить', () => setState(_log.clear)),
+                DockAction(Icons.logout_rounded, 'Выйти', () => Navigator.of(context).pop()),
+              ],
+              expanded: _dockOpen,
+              onToggle: () => setState(() => _dockOpen = !_dockOpen),
+            )
+          else
+            const SizedBox(height: 8),
+        ]),
+      ),
     );
   }
 }

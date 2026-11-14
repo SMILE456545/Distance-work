@@ -90,3 +90,30 @@ flutter:
   #
   # For details regarding fonts from package dependencies,
   # see https://flutter.dev/to/font-from-package
+
+  # Kraken Digital brand fonts (SIL Open Font License)
+  fonts:
+    - family: Montserrat
+      fonts:
+        - asset: assets/fonts/Montserrat-400.ttf
+          weight: 400
+        - asset: assets/fonts/Montserrat-500.ttf
+          weight: 500
+        - asset: assets/fonts/Montserrat-600.ttf
+          weight: 600
+        - asset: assets/fonts/Montserrat-700.ttf
+          weight: 700
+        - asset: assets/fonts/Montserrat-800.ttf
+          weight: 800
+        - asset: assets/fonts/Montserrat-Italic-300.ttf
+          weight: 300
+          style: italic
+        - asset: assets/fonts/Montserrat-Italic-500.ttf
+          weight: 500
+          style: italic
+    - family: JetBrainsMono
+      fonts:
+        - asset: assets/fonts/JetBrainsMono-400.ttf
+          weight: 400
+        - asset: assets/fonts/JetBrainsMono-700.ttf
+          weight: 700
