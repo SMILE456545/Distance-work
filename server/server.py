@@ -885,6 +885,28 @@ def run_command(cmd, cwd, timeout=120):
     return {"output": text, "cwd": new_cwd}
 
 
+# ---------------------------------------------------------------- static files
+COMPRESSIBLE = {".js", ".mjs", ".wasm", ".html", ".json", ".css", ".otf", ".ttf", ".svg"}
+_static_cache = {}
+_static_lock = threading.Lock()
+
+
+def static_body(path, st, gz):
+    """File contents, gzip-compressed once and kept in memory (makes the first load ~3× smaller)."""
+    import gzip
+    key = (path, st.st_mtime, st.st_size, gz)
+    with _static_lock:
+        if key in _static_cache:
+            return _static_cache[key]
+    with open(path, "rb") as f:
+        data = f.read()
+    if gz:
+        data = gzip.compress(data, compresslevel=6)
+    with _static_lock:
+        _static_cache[key] = data
+    return data
+
+
 # ---------------------------------------------------------------- http
 class Handler(BaseHTTPRequestHandler):
     server_version = "RemoteDesk/1.0"
@@ -993,11 +1015,25 @@ class Handler(BaseHTTPRequestHandler):
                  ".json": "application/json", ".png": "image/png", ".wasm": "application/wasm",
                  ".css": "text/css", ".ico": "image/x-icon", ".otf": "font/otf",
                  ".ttf": "font/ttf", ".mjs": "text/javascript"}
-        ctype = types.get(os.path.splitext(full)[1].lower(), "application/octet-stream")
-        with open(full, "rb") as f:
-            body = f.read()
+        ext = os.path.splitext(full)[1].lower()
+        ctype = types.get(ext, "application/octet-stream")
+        st = os.stat(full)
+        etag = f'"{int(st.st_mtime)}-{st.st_size}"'
+        # the phone keeps files it already has; it only asks whether they changed
+        if self.headers.get("If-None-Match") == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.end_headers()
+            return
+        gz = "gzip" in (self.headers.get("Accept-Encoding") or "") and ext in COMPRESSIBLE
+        body = static_body(full, st, gz)
         self.send_response(200)
         self.send_header("Content-Type", ctype)
+        self.send_header("ETag", etag)
+        self.send_header("Cache-Control", "no-cache")
+        if gz:
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Vary", "Accept-Encoding")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)

@@ -1,5 +1,4 @@
 @echo off
-if not "%~1"=="run" (start "" conhost.exe cmd /c ""%~f0" run" & exit /b)
 chcp 65001 >nul
 title RemoteDesk - server
 cd /d "%~dp0"
