@@ -331,6 +331,347 @@ class Streamer:
 STREAM = Streamer()
 
 
+# ---------------------------------------------------------------- easy commands
+HOME = os.path.expanduser("~")
+DESKTOP = os.path.join(HOME, "Desktop")
+LOCAL = os.environ.get("LOCALAPPDATA", "")
+NEW_CONSOLE = subprocess.CREATE_NEW_CONSOLE
+
+# name -> (aliases, how to open)
+BUILTIN_APPS = [
+    ("Opera", ["opera", "опера", "браузер", "browser"],
+     os.path.join(LOCAL, "Programs", "Opera", "opera.exe")),
+    ("Streak", ["streak", "стрик"],
+     os.path.join(HOME, r"Downloads\streak-main\streak-main\build\windows\x64\runner\Release\Streak.exe")),
+    ("VS Code", ["vscode", "vsc", "code", "вскод", "visual studio code"],
+     os.path.join(LOCAL, "Programs", "Microsoft VS Code", "Code.exe")),
+    ("CMD (консоль)", ["cmd", "консоль", "командная строка"], "cmd"),
+    ("PowerShell", ["powershell", "пш"], "powershell"),
+    ("Рабочий стол", ["desktop", "рабочий стол", "стол"], ("folder", DESKTOP)),
+    ("Проводник", ["проводник", "explorer", "папки"], ("folder", HOME)),
+    ("Загрузки", ["загрузки", "downloads"], ("folder", os.path.join(HOME, "Downloads"))),
+    ("Документы", ["документы", "documents"], ("folder", os.path.join(HOME, "Documents"))),
+    ("Unity Hub", ["unity hub", "юнити хаб", "хаб"], os.path.join(DESKTOP, "Unity Hub.lnk")),
+    ("Claude Code", ["claude", "клод"], ("claude", None)),
+    ("Блокнот", ["блокнот", "notepad"], "notepad.exe"),
+    ("Калькулятор", ["калькулятор", "calc"], "calc.exe"),
+    ("Диспетчер задач", ["диспетчер задач", "диспетчер", "taskmgr"], "taskmgr.exe"),
+    ("Параметры", ["параметры", "настройки", "settings"], "ms-settings:"),
+]
+
+
+def _shortcuts():
+    """Start Menu and Desktop shortcuts: lowercase name -> path."""
+    roots = [
+        os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs"),
+        os.path.join(os.environ.get("PROGRAMDATA", ""), r"Microsoft\Windows\Start Menu\Programs"),
+        DESKTOP, os.path.join(os.environ.get("PUBLIC", ""), "Desktop"),
+    ]
+    found = {}
+    for root in roots:
+        for dirpath, _, files in os.walk(root):
+            for f in files:
+                name, ext = os.path.splitext(f)
+                if ext.lower() in (".lnk", ".url") and not re_skip(name):
+                    found.setdefault(name.lower(), os.path.join(dirpath, f))
+    return found
+
+
+def re_skip(name):
+    n = name.lower()
+    return any(w in n for w in ("uninstall", "удал", "readme", "help", "documentation", "release notes",
+                                 "manual", "report a problem", "website"))
+
+
+def find_app(query):
+    q = query.strip().lower()
+    if not q:
+        return None
+    for title, aliases, target in BUILTIN_APPS:
+        if q == title.lower() or q in aliases:
+            return title, target
+    sc = _shortcuts()
+    if q in sc:
+        return query, sc[q]
+    for title, aliases, target in BUILTIN_APPS:
+        if any(a.startswith(q) or q in a for a in aliases):
+            return title, target
+    for name, path in sc.items():
+        if name.startswith(q):
+            return os.path.splitext(os.path.basename(path))[0], path
+    for name, path in sc.items():
+        if q in name:
+            return os.path.splitext(os.path.basename(path))[0], path
+    return None
+
+
+def unity_editor(project=None):
+    base = r"C:\Program Files\Unity\Hub\Editor"
+    if not os.path.isdir(base):
+        return None
+    versions = sorted(os.listdir(base), reverse=True)
+    if project:
+        try:
+            with open(os.path.join(project, "ProjectSettings", "ProjectVersion.txt"), encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("m_EditorVersion:"):
+                        v = line.split(":", 1)[1].strip()
+                        if v in versions:
+                            versions.insert(0, v)
+        except OSError:
+            pass
+    for v in versions:
+        exe = os.path.join(base, v, "Editor", "Unity.exe")
+        if os.path.isfile(exe):
+            return exe
+    return None
+
+
+def is_unity(path):
+    return os.path.isdir(os.path.join(path, "Assets")) and os.path.isdir(os.path.join(path, "ProjectSettings"))
+
+
+PROJECT_MARKERS = (".git", "pubspec.yaml", "package.json", "CLAUDE.md", "ProjectSettings", "pyproject.toml",
+                   "requirements.txt", "index.html", "project.godot")
+
+
+def places():
+    """Folders and projects the user is likely to open, numbered."""
+    items = [("Рабочий стол", DESKTOP), ("Загрузки", os.path.join(HOME, "Downloads")),
+             ("Документы", os.path.join(HOME, "Documents"))]
+    extra = os.path.join(HERE, "places.json")
+    if os.path.exists(extra):
+        try:
+            with open(extra, encoding="utf-8") as f:
+                items += [(p.get("name") or os.path.basename(p["path"]), p["path"]) for p in json.load(f)]
+        except Exception:
+            pass
+    containers = [os.path.join(DESKTOP, "PROJECTS-2026"), os.path.join(DESKTOP, "ИГРЫ")]
+    for c in containers:
+        if os.path.isdir(c):
+            items.append((os.path.basename(c), c))
+            for d in sorted(os.listdir(c)):
+                p = os.path.join(c, d)
+                if os.path.isdir(p) and not d.startswith("."):
+                    items.append((d, p))
+    for d in sorted(os.listdir(HOME)):
+        p = os.path.join(HOME, d)
+        if d.startswith(".") or not os.path.isdir(p) or p in [i[1] for i in items]:
+            continue
+        try:
+            if any(os.path.exists(os.path.join(p, m)) for m in PROJECT_MARKERS):
+                items.append((d, p))
+        except OSError:
+            pass
+    streak = os.path.join(HOME, r"Downloads\streak-main\streak-main")
+    if os.path.isdir(streak):
+        items.append(("Streak (исходники)", streak))
+    seen, out = set(), []
+    for name, p in items:
+        if os.path.isdir(p) and p.lower() not in seen:
+            seen.add(p.lower())
+            out.append({"n": len(out) + 1, "name": name, "path": p, "unity": is_unity(p)})
+    return out
+
+
+def resolve_place(arg, cwd):
+    a = arg.strip().strip('"')
+    if not a:
+        return cwd
+    pl = places()
+    if a.isdigit():
+        i = int(a)
+        if 1 <= i <= len(pl):
+            return pl[i - 1]["path"]
+    p = a if os.path.isabs(a) else os.path.join(cwd, a)
+    if os.path.exists(p):
+        return os.path.normpath(p)
+    al = a.lower()
+    for item in pl:
+        if item["name"].lower() == al:
+            return item["path"]
+    for item in pl:
+        if al in item["name"].lower():
+            return item["path"]
+    return None
+
+
+def launch(target, arg=None):
+    if isinstance(target, tuple):
+        kind, val = target
+        if kind == "folder":
+            os.startfile(val)
+        elif kind == "claude":
+            open_claude(arg or HOME)
+        return
+    if target in ("cmd", "powershell"):
+        subprocess.Popen([target], cwd=arg or HOME, creationflags=NEW_CONSOLE)
+        return
+    if target.lower().endswith("code.exe") and arg:
+        subprocess.Popen([target, arg])
+        return
+    os.startfile(target)
+
+
+def claude_exe():
+    import shutil
+    return shutil.which("claude") or os.path.join(HOME, r".local\bin\claude.exe")
+
+
+def open_claude(path):
+    subprocess.Popen(["cmd", "/k", f"title Claude Code - {os.path.basename(path)} && \"{claude_exe()}\""],
+                     cwd=path, creationflags=NEW_CONSOLE)
+
+
+CLAUDE_CHATS = set()   # folders where a phone chat with Claude was started
+
+
+def ask_claude(text, cwd):
+    args = [claude_exe(), "-p", text, "--permission-mode", "acceptEdits"]
+    cont = cwd.lower() in CLAUDE_CHATS
+    try:
+        p = subprocess.run(args + (["--continue"] if cont else []), cwd=cwd, capture_output=True,
+                           stdin=subprocess.DEVNULL, timeout=600, creationflags=subprocess.CREATE_NO_WINDOW)
+        out = (p.stdout or b"").decode("utf-8", "replace").strip()
+        err = (p.stderr or b"").decode("utf-8", "replace").strip()
+        if cont and p.returncode != 0 and "conversation" in (out + err).lower():
+            p = subprocess.run(args, cwd=cwd, capture_output=True, stdin=subprocess.DEVNULL, timeout=600,
+                               creationflags=subprocess.CREATE_NO_WINDOW)
+            out = (p.stdout or b"").decode("utf-8", "replace").strip()
+            err = (p.stderr or b"").decode("utf-8", "replace").strip()
+    except subprocess.TimeoutExpired:
+        return "[Claude думал дольше 10 минут — ответ не дождались]"
+    CLAUDE_CHATS.add(cwd.lower())
+    return out or err or "[пустой ответ]"
+
+
+HELP = """КОМАНДЫ (можно писать по-русски)
+
+  программы            — список программ, которые можно открыть
+  открыть <программа>  — открыть программу:  открыть opera,  открыть streak
+  <программа>          — то же самое коротко:  opera,  vscode,  cmd,  unity hub
+
+  проекты              — список папок и проектов с номерами
+  перейти <номер>      — зайти в папку проекта (тут будут выполняться команды)
+  файлы                — что лежит в текущей папке
+  папка [номер]        — открыть папку в Проводнике
+  открыть <файл>       — открыть файл из текущей папки
+
+  vscode <номер>       — открыть проект в VS Code
+  claude <номер>       — открыть Claude Code в окне на ноутбуке (смотрите во вкладке «Экран»)
+  спроси <вопрос>      — спросить Claude прямо здесь, в текущей папке
+                         (он может читать и менять файлы проекта)
+  новый чат            — следующий «спроси» начнёт разговор с Claude заново
+
+  unity                — открыть Unity Hub
+  unity <номер>        — открыть проект в Unity
+
+  Вместо номера можно писать название:  claude RemoteDesk,  unity My project
+  Любые другие команды выполняются в PowerShell:  dir,  cd ..,  ipconfig"""
+
+
+def friendly(cmd, cwd):
+    """Easy Russian commands. Returns {'output', 'cwd'} or None to fall back to PowerShell."""
+    text = cmd.strip()
+    low = text.lower()
+    word, _, rest = text.partition(" ")
+    w = word.lower()
+    rest = rest.strip()
+
+    def res(out, new_cwd=cwd):
+        return {"output": out, "cwd": new_cwd}
+
+    if low in ("помощь", "help", "команды", "?"):
+        return res(HELP)
+    if low in ("программы", "приложения", "apps"):
+        names = [f"  {t:<18} — {', '.join(a[:3])}" for t, a, _ in BUILTIN_APPS]
+        sc = sorted({os.path.splitext(os.path.basename(p))[0] for p in _shortcuts().values()})
+        return res("ГЛАВНЫЕ (открыть <имя>):\n" + "\n".join(names)
+                   + "\n\nВСЕ ЯРЛЫКИ ИЗ МЕНЮ ПУСК:\n  " + ", ".join(sc))
+    if low in ("проекты", "папки проектов", "места", "projects"):
+        lines = [f"  {p['n']:>2}. {p['name']}{'  [Unity]' if p['unity'] else ''}\n      {p['path']}"
+                 for p in places()]
+        return res("ПАПКИ И ПРОЕКТЫ:\n" + "\n".join(lines)
+                   + "\n\nНапример:  перейти 4   ·   claude 4   ·   vscode 4   ·   папка 4")
+    if low in ("файлы", "ls", "список"):
+        try:
+            entries = sorted((n for n in os.listdir(cwd) if not n.startswith((".", "$"))
+                              and n not in ("Application Data", "Local Settings", "NTUSER.DAT", "ntuser.ini",
+                                            "Cookies", "NetHood", "PrintHood", "Recent", "SendTo",
+                                            "Главное меню", "Шаблоны", "Мои документы")
+                              and not n.lower().startswith("ntuser")), key=lambda n: (not os.path.isdir(os.path.join(cwd, n)), n.lower()))
+        except OSError as e:
+            return res(str(e))
+        lines = [("📁 " if os.path.isdir(os.path.join(cwd, n)) else "   ") + n for n in entries[:200]]
+        return res(f"{cwd}\n" + ("\n".join(lines) or "(пусто)"))
+    if low == "новый чат":
+        CLAUDE_CHATS.discard(cwd.lower())
+        return res("Следующий вопрос «спроси …» начнёт новый разговор с Claude.")
+    if w in ("спроси", "ask", "claude:"):
+        if not rest:
+            return res("Напишите вопрос после слова «спроси», например:  спроси что делает этот проект?")
+        return res(ask_claude(rest, cwd))
+    if w in ("перейти", "зайти", "go"):
+        p = resolve_place(rest, cwd)
+        if not p or not os.path.isdir(p):
+            return res(f"Не нашёл папку «{rest}». Напишите «проекты», чтобы увидеть список.")
+        return res(f"Теперь вы в папке: {p}", p)
+    if w in ("папка", "folder"):
+        p = resolve_place(rest, cwd)
+        if not p:
+            return res(f"Не нашёл папку «{rest}». Напишите «проекты».")
+        os.startfile(p)
+        return res(f"Открыл в Проводнике: {p}")
+    if w in ("vscode", "vsc", "code") and rest:
+        p = resolve_place(rest, cwd)
+        if not p:
+            return res(f"Не нашёл «{rest}». Напишите «проекты».")
+        launch(BUILTIN_APPS[2][2], p)
+        return res(f"Открываю в VS Code: {p}")
+    if w in ("claude", "клод"):
+        p = resolve_place(rest, cwd) if rest else cwd
+        if not p:
+            return res(f"Не нашёл «{rest}». Напишите «проекты».")
+        open_claude(p)
+        return res(f"Открыл Claude Code в папке {p}\nОкно появилось на ноутбуке — работайте с ним во вкладке «Экран».\n"
+                   "Или задавайте вопросы прямо отсюда:  спроси <вопрос>")
+    if w in ("unity", "юнити") and low not in ("unity hub", "юнити хаб"):
+        if not rest:
+            p = cwd if is_unity(cwd) else None
+            if not p:
+                launch(os.path.join(DESKTOP, "Unity Hub.lnk")
+                       if os.path.exists(os.path.join(DESKTOP, "Unity Hub.lnk")) else r"C:\Program Files\Unity Hub\Unity Hub.exe")
+                return res("Открываю Unity Hub.  Чтобы открыть проект сразу:  unity <номер>")
+        else:
+            p = resolve_place(rest, cwd)
+        if not p or not is_unity(p):
+            return res(f"«{rest}» — не проект Unity (нет папок Assets и ProjectSettings). Проекты Unity "
+                       "в списке «проекты» помечены [Unity].")
+        exe = unity_editor(p)
+        if not exe:
+            return res("Не нашёл установленный редактор Unity.")
+        subprocess.Popen([exe, "-projectPath", p])
+        return res(f"Открываю в Unity: {p}\n(загрузка может занять минуту)")
+    if w in ("открыть", "открой", "запусти", "запустить", "open", "start"):
+        if not rest:
+            return res("Что открыть? Например:  открыть opera   ·   «программы» — весь список")
+        f = os.path.join(cwd, rest.strip('"'))
+        if os.path.exists(f):
+            os.startfile(f)
+            return res(f"Открываю: {f}")
+        app = find_app(rest)
+        if not app:
+            return res(f"Не нашёл программу «{rest}». Напишите «программы», чтобы увидеть список.")
+        launch(app[1], cwd)
+        return res(f"Открываю {app[0]}")
+    if " " not in low or any(low == a for _, aliases, _ in BUILTIN_APPS for a in aliases):
+        for title, aliases, target in BUILTIN_APPS:
+            if low == title.lower() or low in aliases:
+                launch(target, cwd)
+                return res(f"Открываю {title}")
+    return None
+
+
 # ---------------------------------------------------------------- terminal
 MARK = "__RD_CWD__"
 
@@ -338,6 +679,12 @@ MARK = "__RD_CWD__"
 def run_command(cmd, cwd, timeout=120):
     if not cwd or not os.path.isdir(cwd):
         cwd = os.path.expanduser("~")
+    try:
+        easy = friendly(cmd, cwd)
+    except Exception as e:
+        easy = {"output": f"Ошибка: {e}", "cwd": cwd}
+    if easy is not None:
+        return easy
     script = (
         "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
         "$OutputEncoding=[Text.Encoding]::UTF8;"
@@ -412,6 +759,8 @@ class Handler(BaseHTTPRequestHandler):
                     "monitors": [{"width": m["width"], "height": m["height"]} for m in mons],
                     "home": os.path.expanduser("~"),
                 })
+            if u.path == "/api/places":
+                return self._json(places())
             if u.path == "/api/stream":
                 settings = (int(q.get("m", ["0"])[0]), int(q.get("w", ["1280"])[0]),
                             max(10, min(95, int(q.get("q", ["60"])[0]))))

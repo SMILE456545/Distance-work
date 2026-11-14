@@ -56,6 +56,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
   // gestures
   TouchMode _mode = TouchMode.direct;
   bool _dragLock = false;
+  bool _scrollMode = false;
   final Map<int, Offset> _pointers = {};
   Offset? _start;
   DateTime _startTime = DateTime.now();
@@ -276,7 +277,13 @@ class _RemoteScreenState extends State<RemoteScreen> {
       }
     }
     if (!_moved) return;
-    if (_mode == TouchMode.direct) {
+    if (_scrollMode && !_dragLock) {
+      // finger up/down scrolls the page under the finger (like on a phone)
+      final delta = e.localPosition - (_lastPos ?? e.localPosition);
+      if (_lastPos == _start && _mode == TouchMode.direct) _send(_at('move', _start!));
+      final dy = (delta.dy * 6).round();
+      if (dy != 0) _send({'t': 'scroll', 'dy': dy, 'dx': 0});
+    } else if (_mode == TouchMode.direct) {
       _send(_at('move', e.localPosition));
     } else {
       final delta = e.localPosition - (_lastPos ?? e.localPosition);
@@ -424,25 +431,6 @@ class _RemoteScreenState extends State<RemoteScreen> {
               ),
             ),
           ),
-          // scroll strip on the right edge
-          Positioned(
-            right: 0,
-            top: 0,
-            bottom: 0,
-            width: 34,
-            child: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onVerticalDragUpdate: (d) => _send({'t': 'scroll', 'dy': (d.delta.dy * 8).round(), 'dx': 0}),
-              child: Container(
-                margin: const EdgeInsets.symmetric(vertical: 40),
-                decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.06),
-                  borderRadius: const BorderRadius.horizontal(left: Radius.circular(10)),
-                ),
-                child: const Center(child: Icon(Icons.unfold_more, size: 18, color: Colors.white38)),
-              ),
-            ),
-          ),
           Positioned(
             left: 8,
             top: 8,
@@ -520,7 +508,16 @@ class _RemoteScreenState extends State<RemoteScreen> {
             setState(() => _dragLock = !_dragLock);
             _snack(_dragLock ? 'Перетаскивание включено: ведите пальцем, чтобы тянуть' : 'Перетаскивание выключено');
           }, on: _dragLock),
-          _toolBtn(Icons.ads_click, 'Правый клик (или долгое нажатие)', () => _send({'t': 'click', 'b': 'right'})),
+          _toolBtn(Icons.swap_vert, 'Прокрутка пальцем', () {
+            setState(() {
+              _scrollMode = !_scrollMode;
+              if (_scrollMode) _dragLock = false;
+            });
+            _snack(_scrollMode
+                ? 'Прокрутка: ведите пальцем вверх/вниз, чтобы листать. Нажатия работают как обычно'
+                : 'Прокрутка выключена');
+          }, on: _scrollMode),
+          _toolBtn(Icons.ads_click,'Правый клик (или долгое нажатие)', () => _send({'t': 'click', 'b': 'right'})),
           _toolBtn(Icons.zoom_out_map, 'Сбросить масштаб', () => setState(() {
                 _scale = 1;
                 _offset = Offset.zero;

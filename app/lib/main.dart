@@ -179,18 +179,19 @@ class _HomeScreenState extends State<HomeScreen> {
       body: IndexedStack(
         index: _tab,
         children: [
-          RemoteScreen(api: widget.api, info: widget.info, active: _tab == 0),
           TerminalScreen(api: widget.api, info: widget.info),
+          // the screen picture is only downloaded while this tab is open
+          RemoteScreen(api: widget.api, info: widget.info, active: _tab == 1),
         ],
       ),
       bottomNavigationBar: NavigationBar(
         height: 60,
         selectedIndex: _tab,
-        labelBehavior: NavigationDestinationLabelBehavior.alwaysHide,
+        labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
         onDestinationSelected: (i) => setState(() => _tab = i),
         destinations: const [
-          NavigationDestination(icon: Icon(Icons.desktop_windows_outlined), selectedIcon: Icon(Icons.desktop_windows), label: 'Экран'),
           NavigationDestination(icon: Icon(Icons.terminal_outlined), selectedIcon: Icon(Icons.terminal), label: 'Терминал'),
+          NavigationDestination(icon: Icon(Icons.desktop_windows_outlined), selectedIcon: Icon(Icons.desktop_windows), label: 'Экран'),
         ],
       ),
     );

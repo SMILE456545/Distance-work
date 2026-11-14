@@ -30,6 +30,14 @@ class Frame {
   Frame(this.bytes, this.tag);
 }
 
+class Place {
+  final int n;
+  final String name;
+  final String path;
+  final bool unity;
+  Place(this.n, this.name, this.path, this.unity);
+}
+
 class Patch {
   final double x, y, w, h;
   final Uint8List bytes;
@@ -138,10 +146,19 @@ class Api {
   Future<(String, String)> cmd(String command, String cwd) async {
     final r = await _client
         .post(_u('/api/cmd'), headers: _headers, body: jsonEncode({'cmd': command, 'cwd': cwd}))
-        .timeout(const Duration(seconds: 130));
+        .timeout(const Duration(seconds: 620)); // «спроси» waits for Claude up to 10 min
     _check(r);
     final j = jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
     return (j['output'] as String? ?? '', j['cwd'] as String? ?? cwd);
+  }
+
+  Future<List<Place>> places() async {
+    final r = await _client.get(_u('/api/places'), headers: _headers).timeout(const Duration(seconds: 10));
+    _check(r);
+    return [
+      for (final p in jsonDecode(utf8.decode(r.bodyBytes)) as List)
+        Place(p['n'] as int, p['name'] as String, p['path'] as String, p['unity'] as bool),
+    ];
   }
 
   void _check(http.Response r) {
