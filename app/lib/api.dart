@@ -74,15 +74,18 @@ class Api {
   final String host;
   final int port;
   final String key;
+
+  /// true = https (connection from the internet through the DuckDNS name).
+  final bool secure;
   final http.Client _client = http.Client();
 
   /// Round-trip time measured when connecting, in milliseconds.
   int rttMs = 0;
 
-  Api(this.host, this.port, this.key);
+  Api(this.host, this.port, this.key, {this.secure = false});
 
   Uri _u(String path, [Map<String, String>? q]) =>
-      Uri(scheme: 'http', host: host, port: port, path: path, queryParameters: q);
+      Uri(scheme: secure ? 'https' : 'http', host: host, port: port, path: path, queryParameters: q);
 
   Map<String, String> get _headers => {'X-Key': key, 'Content-Type': 'application/json'};
 
@@ -152,6 +155,15 @@ class Api {
     return (j['output'] as String? ?? '', j['cwd'] as String? ?? cwd);
   }
 
+  /// WebRTC: sends the phone's offer, gets the laptop's answer (fast H.264 video).
+  Future<Map<String, dynamic>> rtc(Map<String, dynamic> offer) async {
+    final r = await _client
+        .post(_u('/api/rtc'), headers: _headers, body: jsonEncode(offer))
+        .timeout(const Duration(seconds: 25));
+    _check(r);
+    return jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
+  }
+
   Future<List<Place>> places() async {
     final r = await _client.get(_u('/api/places'), headers: _headers).timeout(const Duration(seconds: 10));
     _check(r);
@@ -163,6 +175,13 @@ class Api {
 
   void _check(http.Response r) {
     if (r.statusCode == 401) throw ApiError('Неверный ключ доступа');
+    if (r.statusCode == 429) {
+      String msg = 'Слишком много неверных ключей — доступ временно закрыт';
+      try {
+        msg = (jsonDecode(utf8.decode(r.bodyBytes)) as Map)['error'] as String;
+      } catch (_) {}
+      throw ApiError(msg);
+    }
     if (r.statusCode >= 400) {
       String msg = 'Ошибка сервера ${r.statusCode}';
       try {

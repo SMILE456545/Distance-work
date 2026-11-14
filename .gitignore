@@ -7,3 +7,7 @@ __pycache__/
 web/
 *.apk
 app/android/build/
+
+# Caddy (HTTPS) binary, its config and logs; login log
+server/bin/
+server/access.log

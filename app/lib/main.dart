@@ -55,15 +55,38 @@ class _ConnectScreenState extends State<ConnectScreen> {
     // When the app is opened from the server itself in a browser, use that address.
     final fromWeb = kIsWeb && Uri.base.host.isNotEmpty && Uri.base.scheme.startsWith('http');
     setState(() {
-      _host.text = fromWeb ? Uri.base.host : (p.getString('host') ?? '');
+      _host.text = fromWeb
+          ? (Uri.base.scheme == 'https' ? 'https://${Uri.base.host}' : Uri.base.host)
+          : (p.getString('host') ?? '');
       _port.text = fromWeb ? '${Uri.base.port}' : (p.getString('port') ?? '8765');
       _key.text = p.getString('key') ?? '';
     });
   }
 
+  /// «192.168.0.10», «https://mydesk.duckdns.org:8443» or just «mydesk.duckdns.org».
+  (String, int, bool) _address() {
+    var text = _host.text.trim();
+    var port = int.tryParse(_port.text.trim());
+    var secure = text.startsWith('https://') || text.endsWith('.duckdns.org');
+    if (text.contains('://')) {
+      final u = Uri.tryParse(text);
+      if (u != null && u.host.isNotEmpty) {
+        text = u.host;
+        if (u.hasPort) port = u.port;
+      }
+    }
+    text = text.split('/').first;
+    if (text.contains(':') && !text.contains('::')) {
+      final parts = text.split(':');
+      text = parts.first;
+      port = int.tryParse(parts.last) ?? port;
+    }
+    if (secure && (port == null || port == 8765)) port = 8443;
+    return (text, port ?? 8765, secure);
+  }
+
   Future<void> _connect() async {
-    final host = _host.text.trim();
-    final port = int.tryParse(_port.text.trim()) ?? 8765;
+    final (host, port, secure) = _address();
     final key = _key.text.trim();
     if (host.isEmpty || key.isEmpty) {
       setState(() => _error = 'Введите адрес и ключ');
@@ -73,11 +96,11 @@ class _ConnectScreenState extends State<ConnectScreen> {
       _busy = true;
       _error = null;
     });
-    final api = Api(host, port, key);
+    final api = Api(host, port, key, secure: secure);
     try {
       final info = await api.info();
       final p = await SharedPreferences.getInstance();
-      await p.setString('host', host);
+      await p.setString('host', secure ? 'https://$host' : host);
       await p.setString('port', '$port');
       await p.setString('key', key);
       if (!mounted) return;
@@ -85,8 +108,8 @@ class _ConnectScreenState extends State<ConnectScreen> {
     } on ApiError catch (e) {
       setState(() => _error = e.message);
     } catch (_) {
-      setState(() => _error = 'Не удалось подключиться. Проверьте, что сервер запущен '
-          'и телефон в той же сети Wi-Fi.');
+      setState(() => _error = 'Не удалось подключиться. Проверьте, что сервер на ноутбуке запущен. '
+          'Дома — адрес вида 192.168.x.x, из любого места — адрес Tailscale (100.x.x.x)');
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -117,7 +140,9 @@ class _ConnectScreenState extends State<ConnectScreen> {
                     controller: _host,
                     keyboardType: TextInputType.url,
                     decoration: const InputDecoration(
-                        labelText: 'Адрес компьютера', hintText: '192.168.0.10', border: OutlineInputBorder()),
+                        labelText: 'Адрес компьютера',
+                        hintText: '192.168.x.x  или  100.x.x.x (Tailscale)',
+                        border: OutlineInputBorder()),
                   ),
                   const SizedBox(height: 14),
                   TextField(
@@ -128,10 +153,14 @@ class _ConnectScreenState extends State<ConnectScreen> {
                   const SizedBox(height: 14),
                   TextField(
                     controller: _key,
-                    keyboardType: TextInputType.number,
+                    keyboardType: TextInputType.visiblePassword,
+                    textCapitalization: TextCapitalization.characters,
+                    autocorrect: false,
+                    enableSuggestions: false,
                     obscureText: true,
                     onSubmitted: (_) => _connect(),
-                    decoration: const InputDecoration(labelText: 'Ключ доступа', border: OutlineInputBorder()),
+                    decoration: const InputDecoration(
+                        labelText: 'Ключ доступа', hintText: 'XXXX-XXXX-XXXX-XXXX', border: OutlineInputBorder()),
                   ),
                   if (_error != null) ...[
                     const SizedBox(height: 14),

@@ -1,2 +1,5 @@
 mss
 pillow
+aiortc
+numpy
+dxcam

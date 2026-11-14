@@ -35,6 +35,20 @@ user32 = ctypes.windll.user32
 
 
 # ---------------------------------------------------------------- config
+KEY_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"  # no 0/O, 1/I/L — easy to type
+
+
+def new_key():
+    """16 characters ≈ 80 bits: can't be guessed even without the lockout below."""
+    raw = "".join(secrets.choice(KEY_ALPHABET) for _ in range(16))
+    return "-".join(raw[i:i + 4] for i in range(0, 16, 4))
+
+
+def save_config(cfg):
+    with open(CONFIG, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+
 def load_config():
     cfg = {}
     if os.path.exists(CONFIG):
@@ -43,15 +57,193 @@ def load_config():
                 cfg = json.load(f)
         except Exception:
             cfg = {}
-    if not cfg.get("key"):
-        cfg["key"] = "".join(secrets.choice("0123456789") for _ in range(8))
+    # the old 8-digit key is fine for Wi-Fi at home, not for the internet
+    if len(cfg.get("key", "")) < 16:
+        cfg["key"] = new_key()
     cfg.setdefault("port", PORT)
-    with open(CONFIG, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    cfg.setdefault("domain", "")          # e.g. mydesk.duckdns.org
+    cfg.setdefault("duckdns_token", "")
+    cfg.setdefault("https_port", 8443)    # forwarded on the router (TCP)
+    cfg.setdefault("rtc_port", 8766)      # forwarded on the router (UDP), video
+    save_config(cfg)
     return cfg
 
 
 CFG = load_config()
+
+
+# ---------------------------------------------------------------- protection from guessing the key
+LOG_FILE = os.path.join(HERE, "access.log")
+
+
+class Guard:
+    """After 5 different wrong keys from one address it is blocked for 15 minutes,
+    then for longer and longer (up to a day). Only *different* keys count: a phone
+    that keeps retrying with an old saved key is not guessing and isn't blocked.
+    Too many wrong keys from everywhere together slow every wrong attempt down."""
+
+    MAX_FAILS, WINDOW, BAN = 5, 600, 900
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.fails = {}       # ip -> [times]
+        self.banned = {}      # ip -> until
+        self.strikes = {}     # ip -> how many times banned
+        self.all_fails = []
+        self.known = set()
+
+    def blocked(self, ip):
+        with self.lock:
+            until = self.banned.get(ip, 0)
+            return max(0, int(until - time.time()))
+
+    def fail(self, ip, path, key):
+        now = time.time()
+        tag = hashlib.sha256(key.encode()).hexdigest()[:16]
+        with self.lock:
+            f = {k: t for k, t in self.fails.get(ip, {}).items() if now - t < self.WINDOW}
+            repeat = tag in f
+            f[tag] = now
+            self.fails[ip] = f
+            self.all_fails = [t for t in self.all_fails if now - t < 3600] + [now]
+            banned = len(f) >= self.MAX_FAILS
+            if banned:
+                n = self.strikes[ip] = self.strikes.get(ip, 0) + 1
+                self.banned[ip] = now + min(86400, self.BAN * 4 ** (n - 1))
+                self.fails[ip] = {}
+            many = len(self.all_fails)
+        if repeat and not banned:
+            time.sleep(0.5)
+            return
+        log(f"НЕВЕРНЫЙ КЛЮЧ  {ip}  {path}" + ("  → заблокирован" if banned else ""))
+        if banned:
+            print(f"  [!] {time.strftime('%H:%M')} адрес {ip} заблокирован: много неверных ключей")
+        time.sleep(0.5 if many < 20 else 3)
+
+    def ok(self, ip):
+        with self.lock:
+            self.fails.pop(ip, None)
+            new = ip not in self.known
+            self.known.add(ip)
+        if new:
+            log(f"ВХОД  {ip}")
+            print(f"  [+] {time.strftime('%H:%M')} подключение с адреса {ip}")
+
+
+def log(text):
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {text}\n")
+    except OSError:
+        pass
+
+
+GUARD = Guard()
+
+
+# ---------------------------------------------------------------- internet address (DuckDNS)
+PUBLIC = {"ip": None}
+
+
+def fetch_public_ip():
+    import urllib.request
+    for url in ("https://api.ipify.org", "https://ifconfig.me/ip"):
+        try:
+            with urllib.request.urlopen(url, timeout=8) as r:
+                ip = r.read().decode().strip()
+                socket.inet_aton(ip)
+                return ip
+        except Exception:
+            continue
+    return None
+
+
+def duckdns_loop():
+    """Keeps <name>.duckdns.org pointing at this laptop when the provider changes the IP."""
+    import urllib.request
+    last = None
+    while True:
+        ip = fetch_public_ip()
+        if ip:
+            PUBLIC["ip"] = ip
+            if CFG.get("domain") and CFG.get("duckdns_token") and ip != last:
+                name = CFG["domain"].split(".")[0]
+                url = (f"https://www.duckdns.org/update?domains={name}"
+                       f"&token={CFG['duckdns_token']}&ip={ip}")
+                try:
+                    with urllib.request.urlopen(url, timeout=10) as r:
+                        if r.read().strip() == b"OK":
+                            last = ip
+                            log(f"DuckDNS: {CFG['domain']} → {ip}")
+                        else:
+                            print("  [!] DuckDNS не принял обновление — проверьте домен и токен в config.json")
+                except Exception:
+                    pass
+        time.sleep(300)
+
+
+# ---------------------------------------------------------------- HTTPS (Caddy)
+CADDY = os.path.join(HERE, "bin", "caddy.exe")
+
+
+def start_caddy():
+    """Caddy gets a free Let's Encrypt certificate for the DuckDNS name, renews it
+    by itself and passes HTTPS traffic to this server."""
+    if not (CFG.get("domain") and CFG.get("duckdns_token") and os.path.isfile(CADDY)):
+        return None
+    caddyfile = os.path.join(HERE, "bin", "Caddyfile")
+    with open(caddyfile, "w", encoding="utf-8") as f:
+        f.write(f"""{{
+	admin off
+	http_port 18080
+	https_port {CFG['https_port']}
+	auto_https disable_redirects
+}}
+
+{CFG['domain']}:{CFG['https_port']} {{
+	tls {{
+		dns duckdns {{env.DUCKDNS_TOKEN}}
+		resolvers 1.1.1.1 8.8.8.8
+	}}
+	header Strict-Transport-Security "max-age=31536000"
+	reverse_proxy 127.0.0.1:{CFG['port']} {{
+		flush_interval -1
+	}}
+}}
+""")
+    env = dict(os.environ, DUCKDNS_TOKEN=CFG["duckdns_token"])
+    logf = open(os.path.join(HERE, "bin", "caddy.log"), "ab")
+    p = subprocess.Popen([CADDY, "run", "--config", caddyfile, "--adapter", "caddyfile"],
+                         cwd=os.path.join(HERE, "bin"), env=env, stdout=logf, stderr=logf,
+                         creationflags=subprocess.CREATE_NO_WINDOW)
+    _kill_with_us(p)
+    return p
+
+
+def _kill_with_us(proc):
+    """Caddy closes together with this window (even when it is closed with the cross)."""
+    k = ctypes.windll.kernel32
+    k.CreateJobObjectW.restype = wt.HANDLE
+    k.OpenProcess.restype = wt.HANDLE
+    job = k.CreateJobObjectW(None, None)
+
+    class LIMITS(ctypes.Structure):
+        _fields_ = [("a", ctypes.c_int64), ("b", ctypes.c_int64), ("flags", wt.DWORD),
+                    ("c", ctypes.c_size_t), ("d", ctypes.c_size_t), ("e", wt.DWORD),
+                    ("f", ctypes.c_size_t), ("g", wt.DWORD), ("h", wt.DWORD)]
+
+    class EXT(ctypes.Structure):
+        _fields_ = [("basic", LIMITS), ("io", ctypes.c_uint64 * 6), ("x", ctypes.c_size_t * 4)]
+
+    info = EXT()
+    info.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    k.SetInformationJobObject(wt.HANDLE(job), 9, ctypes.byref(info), ctypes.sizeof(info))
+    h = k.OpenProcess(0x1F0FFF, False, proc.pid)
+    k.AssignProcessToJobObject(wt.HANDLE(job), wt.HANDLE(h))
+    _JOBS.append(job)
+
+
+_JOBS = []
 
 
 # ---------------------------------------------------------------- input (SendInput)
@@ -928,11 +1120,28 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _ip(self):
+        peer = self.client_address[0]
+        # requests from the internet come through Caddy, which says who really sent them
+        if peer in ("127.0.0.1", "::1") and self.headers.get("X-Forwarded-For"):
+            return self.headers["X-Forwarded-For"].split(",")[-1].strip()
+        return peer
+
     def _authed(self, q):
+        ip = self._ip()
+        left = GUARD.blocked(ip)
+        if left:
+            self._json({"error": f"Слишком много неверных ключей. Доступ с этого адреса закрыт "
+                                 f"ещё на {left // 60 + 1} мин."}, 429)
+            return False
+        def norm(k):
+            return "".join(k.split()).replace("-", "").upper().encode()
         key = self.headers.get("X-Key") or q.get("key", [""])[0]
-        ok = secrets.compare_digest(key.encode(), CFG["key"].encode())
-        if not ok:
-            time.sleep(0.5)
+        ok = secrets.compare_digest(norm(key), norm(CFG["key"]))
+        if ok:
+            GUARD.ok(ip)
+        else:
+            GUARD.fail(ip, urlparse(self.path).path, key)
             self._json({"error": "неверный ключ"}, 401)
         return ok
 
@@ -1055,6 +1264,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True})
             if u.path == "/api/cmd":
                 return self._json(run_command(data.get("cmd", ""), data.get("cwd", "")))
+            if u.path == "/api/rtc":
+                if RTC is None:
+                    return self._json({"error": "видео WebRTC недоступно: " + RTC_ERROR}, 501)
+                return self._json(RTC.answer(data))
         except Exception as e:
             return self._json({"error": str(e)}, 500)
         self._json({"error": "not found"}, 404)
@@ -1109,28 +1322,52 @@ def local_ips():
     return sorted(i for i in ips if not i.startswith("127."))
 
 
+RTC, RTC_ERROR = None, ""
+
+
+def start_rtc():
+    global RTC, RTC_ERROR
+    try:
+        import rtc
+        rtc.RTC_PORT = int(CFG.get("rtc_port", rtc.RTC_PORT))
+        rtc._PIN["port"] = rtc.RTC_PORT
+        RTC = rtc.RtcHub(handle_input, public_ip=lambda: PUBLIC["ip"])
+    except Exception as e:  # missing aiortc etc. — the picture stream still works
+        RTC_ERROR = str(e)
+        print(f"  [!] Быстрое видео выключено ({e}). Установите: pip install aiortc")
+
+
 def main():
     port = int(CFG.get("port", PORT))
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     srv.daemon_threads = True
-    print("=" * 56)
+    start_rtc()
+    threading.Thread(target=duckdns_loop, daemon=True).start()
+    caddy = start_caddy()
+    print("=" * 60)
     print("  RemoteDesk — сервер удалённого доступа запущен")
-    print("=" * 56)
-    for ip in local_ips():
-        print(f"  Адрес:  {ip}    Порт: {port}")
+    print("=" * 60)
     print(f"  Ключ:   {CFG['key']}")
     print()
-    print("  В приложении на телефоне введите адрес, порт и ключ.")
-    if os.path.isdir(WEB_DIR):
-        for ip in local_ips():
-            print(f"  Или в браузере телефона: http://{ip}:{port}")
-    print("  Телефон и ноутбук должны быть в одной сети Wi-Fi.")
+    if caddy:
+        print("  ИЗ ЛЮБОГО МЕСТА (интернет, без Tailscale):")
+        print(f"     https://{CFG['domain']}:{CFG['https_port']}")
+        print()
+    print("  ДОМА (та же сеть Wi-Fi) или через Tailscale:")
+    for ip in local_ips():
+        print(f"     http://{ip}:{port}")
+    print()
+    print("  Видео экрана: " + ("быстрое (H.264 / WebRTC)" if RTC else "обычное (картинки)"))
+    print(f"  Журнал входов: {LOG_FILE}")
     print("  Закройте это окно, чтобы выключить доступ.")
-    print("=" * 56)
+    print("=" * 60)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        if caddy:
+            caddy.terminate()
 
 
 if __name__ == "__main__":

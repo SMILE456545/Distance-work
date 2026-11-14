@@ -1,9 +1,11 @@
 ﻿import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import 'api.dart';
 
@@ -12,14 +14,16 @@ enum TouchMode { direct, touchpad }
 class _Quality {
   final String label;
   final int width;
-  final int q;
-  const _Quality(this.label, this.width, this.q);
+  final int q; // JPEG quality (fallback mode)
+  final int fps; // video frames per second
+  final int br; // video bitrate limit, bit/s
+  const _Quality(this.label, this.width, this.q, this.fps, this.br);
 }
 
 const _qualities = [
-  _Quality('Эконом', 960, 45),
-  _Quality('Норма', 1366, 60),
-  _Quality('Высокое', 1920, 75),
+  _Quality('Эконом', 960, 45, 20, 1200000),
+  _Quality('Норма', 1366, 60, 30, 3000000),
+  _Quality('Высокое', 1920, 75, 30, 6000000),
 ];
 
 class RemoteScreen extends StatefulWidget {
@@ -47,6 +51,17 @@ class _RemoteScreenState extends State<RemoteScreen> {
   Timer? _fpsTimer;
   int _quality = 1;
   int _monitor = 0;
+
+  // fast video (H.264 over WebRTC); the picture stream is the fallback
+  final _renderer = RTCVideoRenderer();
+  RTCPeerConnection? _pc;
+  RTCDataChannel? _dc;
+  bool _rtcOn = false; // video frames are being shown
+  bool _rtcFailed = false; // gave up -> picture stream
+  bool _rtcStarting = false;
+  int _rtcRetries = 0;
+  Timer? _rtcWatchdog;
+  Timer? _statsTimer;
 
   // view transform: screen = offset + scale * content
   double _scale = 1;
@@ -86,21 +101,54 @@ class _RemoteScreenState extends State<RemoteScreen> {
   @override
   void initState() {
     super.initState();
-    // far away (via internet / VPN) → start with lighter picture
-    _quality = widget.api.rttMs > 60 ? 0 : 1;
+    // video adapts to the connection by itself; the picture stream needs a lighter start far away
+    _quality = 1;
     _fpsTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted) setState(() => _fps = _framesThisSecond);
+      if (mounted && !_rtcOn) setState(() => _fps = _framesThisSecond);
       _framesThisSecond = 0;
     });
     _kbFocus.addListener(() {
       if (mounted) setState(() {});
     });
+    _renderer.initialize().then((_) {
+      _renderer.onResize = () {
+        if (mounted && _renderer.videoWidth > 0 && !_rtcOn) {
+          _rtcWatchdog?.cancel();
+          _rtcRetries = 0;
+          setState(() {
+            _rtcOn = true;
+            _offline = false;
+          });
+        }
+      };
+      if (widget.active) _startRtc();
+    });
     _loop();
+  }
+
+  @override
+  void didUpdateWidget(RemoteScreen old) {
+    super.didUpdateWidget(old);
+    if (old.active == widget.active) return;
+    if (widget.active) {
+      if (_pc == null && !_rtcFailed) {
+        _startRtc();
+      } else {
+        _dcSend({'t': 'resume'});
+      }
+    } else {
+      // the Terminal tab is open — don't spend mobile traffic on the picture
+      _dcSend({'t': 'pause'});
+    }
   }
 
   @override
   void dispose() {
     _running = false;
+    _rtcWatchdog?.cancel();
+    _statsTimer?.cancel();
+    _pc?.close();
+    _renderer.dispose();
     _fpsTimer?.cancel();
     _longPress?.cancel();
     _kbFocus.dispose();
@@ -108,9 +156,137 @@ class _RemoteScreenState extends State<RemoteScreen> {
     super.dispose();
   }
 
+  // ------------------------------------------------------------ fast video (WebRTC)
+  Future<void> _startRtc() async {
+    if (_rtcStarting || _pc != null || _rtcFailed || !mounted) return;
+    _rtcStarting = true;
+    try {
+      final pc = await createPeerConnection({
+        'iceServers': [
+          {'urls': 'stun:stun.l.google.com:19302'},
+        ],
+        'sdpSemantics': 'unified-plan',
+      });
+      _pc = pc;
+      await pc.addTransceiver(
+        kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
+        init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+      );
+      final dc = await pc.createDataChannel('input', RTCDataChannelInit()..ordered = true);
+      dc.onDataChannelState = (st) {
+        if (st == RTCDataChannelState.RTCDataChannelOpen) {
+          _dc = dc;
+          if (!widget.active) _dcSend({'t': 'pause'});
+        } else if (st == RTCDataChannelState.RTCDataChannelClosed) {
+          if (identical(_dc, dc)) _dc = null;
+        }
+      };
+      pc.onTrack = (e) async {
+        if (e.track.kind != 'video') return;
+        if (e.streams.isNotEmpty) {
+          _renderer.srcObject = e.streams.first;
+        } else {
+          final st = await createLocalMediaStream('remotedesk');
+          await st.addTrack(e.track);
+          _renderer.srcObject = st;
+        }
+      };
+      pc.onConnectionState = (st) {
+        if (!identical(_pc, pc)) return;
+        if (st == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
+            st == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
+          _rtcDrop();
+        } else if (mounted) {
+          setState(() => _offline = st == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected);
+        }
+      };
+      await pc.setLocalDescription(await pc.createOffer({}));
+      // the laptop's server doesn't take addresses one by one — collect them first
+      final sw = Stopwatch()..start();
+      while (pc.iceGatheringState != RTCIceGatheringState.RTCIceGatheringStateComplete &&
+          sw.elapsedMilliseconds < 2500) {
+        await Future.delayed(const Duration(milliseconds: 100));
+      }
+      final local = await pc.getLocalDescription();
+      final q = _qualities[_quality];
+      final ans = await widget.api.rtc({
+        'sdp': local!.sdp,
+        'type': local.type,
+        'w': q.width,
+        'fps': q.fps,
+        'br': q.br,
+        'm': _monitor,
+      });
+      if (!identical(_pc, pc)) return;
+      await pc.setRemoteDescription(RTCSessionDescription(ans['sdp'] as String, ans['type'] as String));
+      _rtcWatchdog?.cancel();
+      _rtcWatchdog = Timer(const Duration(seconds: 12), () {
+        if (!_rtcOn && identical(_pc, pc)) _rtcDrop(giveUp: true);
+      });
+      _statsTimer?.cancel();
+      _statsTimer = Timer.periodic(const Duration(seconds: 1), (_) => _readFps(pc));
+    } catch (_) {
+      _rtcDrop(giveUp: true);
+    } finally {
+      _rtcStarting = false;
+    }
+  }
+
+  Future<void> _readFps(RTCPeerConnection pc) async {
+    if (!_rtcOn || !identical(_pc, pc) || !widget.active) return;
+    try {
+      for (final r in await pc.getStats()) {
+        if (r.type == 'inbound-rtp' && (r.values['kind'] ?? r.values['mediaType']) == 'video') {
+          final f = r.values['framesPerSecond'];
+          if (f is num && mounted) setState(() => _fps = f.round());
+        }
+      }
+    } catch (_) {}
+  }
+
+  void _rtcDrop({bool giveUp = false}) {
+    final pc = _pc;
+    _pc = null;
+    _dc = null;
+    _rtcWatchdog?.cancel();
+    _statsTimer?.cancel();
+    pc?.close();
+    if (!mounted) return;
+    final wasOn = _rtcOn;
+    setState(() => _rtcOn = false);
+    if (!giveUp && _rtcRetries < 3) {
+      _rtcRetries++;
+      Future.delayed(const Duration(seconds: 1), () {
+        if (mounted && widget.active) _startRtc();
+      });
+      return;
+    }
+    setState(() {
+      _rtcFailed = true;
+      if (widget.api.rttMs > 60) _quality = 0; // far away (internet / VPN) → lighter pictures
+    });
+    _snack(wasOn
+        ? 'Видео прервалось — переключаюсь на обычный режим'
+        : 'Быстрое видео не подключилось — работает обычный режим');
+  }
+
+  void _dcSend(Map<String, dynamic> ev) {
+    final dc = _dc;
+    if (dc == null) return;
+    try {
+      dc.send(RTCDataChannelMessage(jsonEncode(ev)));
+    } catch (_) {}
+  }
+
+  void _sendQuality() {
+    final q = _qualities[_quality];
+    _dcSend({'t': 'cfg', 'w': q.width, 'fps': q.fps, 'br': q.br, 'm': _monitor});
+  }
+
+  // ------------------------------------------------------------ picture stream (fallback)
   Future<void> _loop() async {
     while (_running) {
-      if (!widget.active) {
+      if (!widget.active || !_rtcFailed) {
         await Future.delayed(const Duration(milliseconds: 300));
         continue;
       }
@@ -194,7 +370,12 @@ class _RemoteScreenState extends State<RemoteScreen> {
   // ------------------------------------------------------------ sending
   void _send(Map<String, dynamic> ev) {
     ev['m'] = _monitor;
-    _input.add(ev);
+    // over the video connection events skip HTTP requests entirely
+    if (_dc != null) {
+      _dcSend(ev);
+    } else {
+      _input.add(ev);
+    }
   }
 
   Map<String, dynamic> _at(String t, Offset p, [Map<String, dynamic>? extra]) {
@@ -415,7 +596,11 @@ class _RemoteScreenState extends State<RemoteScreen> {
                     child: Stack(children: [
                       Positioned.fromRect(
                         rect: r,
-                        child: _base == null
+                        child: _rtcOn
+                            ? RTCVideoView(_renderer,
+                                objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                                filterQuality: FilterQuality.medium)
+                            : _base == null
                             ? const Center(child: CircularProgressIndicator())
                             : Stack(children: [
                                 Positioned.fill(
@@ -445,7 +630,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
             top: 8,
             child: _badge(_offline
                 ? 'Нет связи…'
-                : '${widget.info.name} · $_fps к/с${_scale > 1 ? ' · ×${_scale.toStringAsFixed(1)}' : ''}',
+                : '${widget.info.name} · $_fps к/с${_rtcOn ? ' · видео' : ''}${_scale > 1 ? ' · ×${_scale.toStringAsFixed(1)}' : ''}',
                 _offline ? const Color(0xFFFF7B72) : Colors.white70),
           ),
           // hidden text field that receives the phone keyboard
@@ -567,6 +752,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
             setState(() {
               _quality = (_quality + 1) % _qualities.length;
             });
+            _sendQuality();
             _snack('Качество: ${_qualities[_quality].label}');
           }),
           if (widget.info.monitors.length > 1)
@@ -574,6 +760,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
               setState(() {
                 _monitor = (_monitor + 1) % widget.info.monitors.length;
               });
+              _sendQuality();
               _snack('Монитор ${_monitor + 1}');
             }),
           _toolBtn(Icons.logout, 'Отключиться', () => Navigator.of(context).pop()),
