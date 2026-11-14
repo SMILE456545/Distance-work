@@ -15,7 +15,7 @@ class RemoteDeskApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'RemoteDesk · Kraken Digital',
+      title: 'RemoteDesk',
       debugShowCheckedModeBanner: false,
       themeMode: ThemeMode.dark,
       darkTheme: K.theme(),
