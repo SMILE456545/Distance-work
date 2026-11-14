@@ -164,6 +164,16 @@ class Api {
     return jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
   }
 
+  /// All programs on the PC: (name, command to open it, is one of the main ones).
+  Future<List<(String, String, bool)>> apps() async {
+    final r = await _client.get(_u('/api/apps'), headers: _headers).timeout(const Duration(seconds: 15));
+    _check(r);
+    return [
+      for (final a in jsonDecode(utf8.decode(r.bodyBytes)) as List)
+        (a['name'] as String, a['cmd'] as String, a['main'] as bool),
+    ];
+  }
+
   Future<List<Place>> places() async {
     final r = await _client.get(_u('/api/places'), headers: _headers).timeout(const Duration(seconds: 10));
     _check(r);

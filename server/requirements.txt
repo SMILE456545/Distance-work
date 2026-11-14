@@ -3,3 +3,4 @@ pillow
 aiortc
 numpy
 dxcam
+pyaudiowpatch

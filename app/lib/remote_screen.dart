@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 
@@ -10,6 +10,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'api.dart';
 import 'kraken/kraken.dart';
 import 'main.dart' show homeTabs;
+import 'sound/unlock.dart';
 
 enum TouchMode { direct, touchpad }
 
@@ -34,8 +35,14 @@ class RemoteScreen extends StatefulWidget {
   final bool active;
   final int tab;
   final ValueChanged<int> onTab;
-  const RemoteScreen(
-      {super.key, required this.api, required this.info, required this.active, required this.tab, required this.onTab});
+  const RemoteScreen({
+    super.key,
+    required this.api,
+    required this.info,
+    required this.active,
+    required this.tab,
+    required this.onTab,
+  });
 
   @override
   State<RemoteScreen> createState() => _RemoteScreenState();
@@ -67,6 +74,8 @@ class _RemoteScreenState extends State<RemoteScreen> {
   int _rtcRetries = 0;
   Timer? _rtcWatchdog;
   Timer? _statsTimer;
+  bool _sound = true; // PC sound on the phone
+  bool _soundUnlocked = false; // browsers need one tap before sound can play
 
   // view transform: screen = offset + scale * content
   double _scale = 1;
@@ -108,7 +117,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
     // video adapts to the connection by itself; the picture stream needs a lighter start far away
     _quality = 1;
     _fpsTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted && !_rtcOn) setState(() => _fps = _framesThisSecond);
+      if (mounted && !_rtcOn && _fps != _framesThisSecond) setState(() => _fps = _framesThisSecond);
       _framesThisSecond = 0;
     });
     _kbFocus.addListener(() {
@@ -176,6 +185,11 @@ class _RemoteScreenState extends State<RemoteScreen> {
         kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
         init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
       );
+      // PC sound
+      await pc.addTransceiver(
+        kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
+        init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+      );
       final dc = await pc.createDataChannel('input', RTCDataChannelInit()..ordered = true);
       dc.onDataChannelState = (st) {
         if (st == RTCDataChannelState.RTCDataChannelOpen) {
@@ -186,6 +200,13 @@ class _RemoteScreenState extends State<RemoteScreen> {
         }
       };
       pc.onTrack = (e) async {
+        if (e.track.kind == 'audio') {
+          e.track.enabled = _sound;
+          // same stream as the picture — the renderer plays it; a separate one is played here
+          if (e.streams.isNotEmpty && identical(_renderer.srcObject, e.streams.first)) return;
+          if (e.streams.isNotEmpty && _renderer.srcObject == null) _renderer.srcObject = e.streams.first;
+          return;
+        }
         if (e.track.kind != 'video') return;
         if (e.streams.isNotEmpty) {
           _renderer.srcObject = e.streams.first;
@@ -220,6 +241,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
         'fps': q.fps,
         'br': q.br,
         'm': _monitor,
+        'sound': _sound,
       });
       if (!identical(_pc, pc)) return;
       await pc.setRemoteDescription(RTCSessionDescription(ans['sdp'] as String, ans['type'] as String));
@@ -242,7 +264,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
       for (final r in await pc.getStats()) {
         if (r.type == 'inbound-rtp' && (r.values['kind'] ?? r.values['mediaType']) == 'video') {
           final f = r.values['framesPerSecond'];
-          if (f is num && mounted) setState(() => _fps = f.round());
+          if (f is num) _fps = f.round(); // not shown while video runs — no rebuild needed
         }
       }
     } catch (_) {}
@@ -269,9 +291,11 @@ class _RemoteScreenState extends State<RemoteScreen> {
       _rtcFailed = true;
       if (widget.api.rttMs > 60) _quality = 0; // far away (internet / VPN) → lighter pictures
     });
-    _snack(wasOn
-        ? 'Видео прервалось — переключаюсь на обычный режим'
-        : 'Быстрое видео не подключилось — работает обычный режим');
+    _snack(
+      wasOn
+          ? 'Видео прервалось — переключаюсь на обычный режим'
+          : 'Быстрое видео не подключилось — работает обычный режим',
+    );
   }
 
   void _dcSend(Map<String, dynamic> ev) {
@@ -397,12 +421,16 @@ class _RemoteScreenState extends State<RemoteScreen> {
 
   // ------------------------------------------------------------ pointer handling
   void _onDown(PointerDownEvent e) {
+    if (!_soundUnlocked && _sound) {
+      _soundUnlocked = true;
+      unlockSound();
+    }
     if (e.kind == PointerDeviceKind.mouse) {
       final b = e.buttons == kSecondaryMouseButton
           ? 'right'
           : e.buttons == kMiddleMouseButton
-              ? 'middle'
-              : 'left';
+          ? 'middle'
+          : 'left';
       _send(_at('down', e.localPosition, {'b': b}));
       return;
     }
@@ -530,12 +558,18 @@ class _RemoteScreenState extends State<RemoteScreen> {
     final deleted = _kbPrev.length - p;
     final added = v.substring(p);
     for (var i = 0; i < deleted; i++) {
-      _send({'t': 'key', 'k': ['backspace']});
+      _send({
+        't': 'key',
+        'k': ['backspace'],
+      });
     }
     if (added.isNotEmpty) {
       if (_mods.isNotEmpty) {
         for (final ch in added.split('')) {
-          _send({'t': 'key', 'k': [..._mods, ch.toLowerCase()]});
+          _send({
+            't': 'key',
+            'k': [..._mods, ch.toLowerCase()],
+          });
         }
         setState(_mods.clear);
       } else {
@@ -564,179 +598,239 @@ class _RemoteScreenState extends State<RemoteScreen> {
       color: K.ink,
       child: SafeArea(
         bottom: false,
-        child: Column(
+        child: Stack(
           children: [
-            Expanded(child: _screen()),
-            if (_kbFocus.hasFocus)
-              // key carousel right above the phone keyboard
-              _kbCarousel()
-            else ...[
-              if (_panelOpen && _showKeys) _keysPanel(),
-              KrakenDock(
-                tabs: homeTabs,
-                tab: widget.tab,
-                onTab: widget.onTab,
-                actions: _actions(),
-                expanded: _panelOpen,
-                onToggle: () => setState(() => _panelOpen = !_panelOpen),
-              ),
-            ],
+            Column(
+              children: [
+                Expanded(child: _screen()),
+                if (_kbFocus.hasFocus)
+                  // key carousel right above the phone keyboard
+                  _kbCarousel()
+                else ...[
+                  if (_panelOpen && _showKeys) _keysPanel(),
+                  KrakenDock(
+                    tabs: homeTabs,
+                    tab: widget.tab,
+                    onTab: widget.onTab,
+                    actions: _actions(),
+                    expanded: _panelOpen,
+                    onToggle: () => setState(() => _panelOpen = !_panelOpen),
+                  ),
+                ],
+              ],
+            ),
+            // hidden text field that receives the phone keyboard — kept away from the video
+            Positioned(left: 0, bottom: 0, width: 2, height: 2, child: _hiddenField()),
           ],
         ),
       ),
     );
   }
 
+  Widget _hiddenField() => Opacity(
+    opacity: 0.01,
+    child: TextField(
+      focusNode: _kbFocus,
+      controller: _kb,
+      autocorrect: false,
+      enableSuggestions: false,
+      keyboardType: TextInputType.multiline,
+      maxLines: null,
+      onChanged: _onKbChanged,
+      // keep the keyboard open while tapping on the remote screen;
+      // it is closed with the keyboard button
+      onTapOutside: (_) {},
+      decoration: const InputDecoration(border: InputBorder.none, isCollapsed: true),
+    ),
+  );
+
   Widget _screen() {
-    return LayoutBuilder(builder: (context, c) {
-      _viewport = Size(c.maxWidth, c.maxHeight);
-      final r = _fitted;
-      return Stack(
-        children: [
-          Positioned.fill(
-            child: Listener(
-              behavior: HitTestBehavior.opaque,
-              onPointerDown: _onDown,
-              onPointerMove: _onMove,
-              onPointerUp: _onUp,
-              onPointerCancel: _onUp,
-              onPointerHover: (e) => _send(_at('move', e.localPosition)),
-              onPointerSignal: _onSignal,
-              child: ClipRect(
-                child: Container(
-                  color: K.ink,
-                  child: Transform(
-                    transform: Matrix4.identity()
-                      ..translateByDouble(_offset.dx, _offset.dy, 0, 1)
-                      ..scaleByDouble(_scale, _scale, 1, 1),
-                    child: Stack(children: [
-                      Positioned.fromRect(
-                        rect: r,
-                        child: _rtcOn
-                            ? RTCVideoView(_renderer,
-                                objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
-                                filterQuality: FilterQuality.medium)
-                            : _base == null
-                            ? Center(
-                                child: Column(mainAxisSize: MainAxisSize.min, children: [
-                                  const AppIcon(size: 72),
-                                  const SizedBox(height: 14),
-                                  Text('Подключаю экран…', style: K.t(14, color: K.muted)),
-                                ]),
-                              )
-                            : Stack(children: [
-                                Positioned.fill(
-                                  child: Image(image: _base!, gaplessPlayback: true, fit: BoxFit.fill,
-                                      filterQuality: FilterQuality.medium),
-                                ),
-                                for (final (p, img) in _patches)
-                                  Positioned(
-                                    left: p.x * r.width / _imgW,
-                                    top: p.y * r.height / _imgH,
-                                    width: p.w * r.width / _imgW,
-                                    height: p.h * r.height / _imgH,
-                                    child: Image(image: img, fit: BoxFit.fill,
-                                        filterQuality: FilterQuality.medium),
+    return LayoutBuilder(
+      builder: (context, c) {
+        _viewport = Size(c.maxWidth, c.maxHeight);
+        final r = _fitted;
+        return Stack(
+          children: [
+            Positioned.fill(
+              child: Listener(
+                behavior: HitTestBehavior.opaque,
+                onPointerDown: _onDown,
+                onPointerMove: _onMove,
+                onPointerUp: _onUp,
+                onPointerCancel: _onUp,
+                onPointerHover: (e) => _send(_at('move', e.localPosition)),
+                onPointerSignal: _onSignal,
+                child: ClipRect(
+                  child: Container(
+                    color: K.ink,
+                    child: Transform(
+                      transform: Matrix4.identity()
+                        ..translateByDouble(_offset.dx, _offset.dy, 0, 1)
+                        ..scaleByDouble(_scale, _scale, 1, 1),
+                      child: Stack(
+                        children: [
+                          Positioned.fromRect(
+                            rect: r,
+                            child: _rtcOn
+                                ? RTCVideoView(
+                                    _renderer,
+                                    objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                                    filterQuality: FilterQuality.medium,
+                                  )
+                                : _base == null
+                                ? Center(
+                                    child: Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Text('Подключаю экран…', style: K.t(14, color: K.muted)),
+                                      ],
+                                    ),
+                                  )
+                                : Stack(
+                                    children: [
+                                      Positioned.fill(
+                                        child: Image(
+                                          image: _base!,
+                                          gaplessPlayback: true,
+                                          fit: BoxFit.fill,
+                                          filterQuality: FilterQuality.medium,
+                                        ),
+                                      ),
+                                      for (final (p, img) in _patches)
+                                        Positioned(
+                                          left: p.x * r.width / _imgW,
+                                          top: p.y * r.height / _imgH,
+                                          width: p.w * r.width / _imgW,
+                                          height: p.h * r.height / _imgH,
+                                          child: Image(
+                                            image: img,
+                                            fit: BoxFit.fill,
+                                            filterQuality: FilterQuality.medium,
+                                          ),
+                                        ),
+                                    ],
                                   ),
-                              ]),
+                          ),
+                        ],
                       ),
-                    ]),
+                    ),
                   ),
                 ),
               ),
             ),
-          ),
-          Positioned(
-            left: 10,
-            top: 10,
-            child: IgnorePointer(
-              child: _badge(_offline
-                  ? 'Нет связи…'
-                  : '${widget.info.name} · $_fps к/с${_rtcOn ? ' · видео' : ''}${_scale > 1 ? ' · ×${_scale.toStringAsFixed(1)}' : ''}',
-                  _offline),
-            ),
-          ),
-          // hidden text field that receives the phone keyboard
-          Positioned(
-            left: 0,
-            bottom: 0,
-            width: 2,
-            height: 2,
-            child: Opacity(
-              opacity: 0.01,
-              child: TextField(
-                focusNode: _kbFocus,
-                controller: _kb,
-                autocorrect: false,
-                enableSuggestions: false,
-                keyboardType: TextInputType.multiline,
-                maxLines: null,
-                onChanged: _onKbChanged,
-                // keep the keyboard open while tapping on the remote screen;
-                // it is closed with the keyboard button
-                onTapOutside: (_) {},
-                decoration: const InputDecoration(border: InputBorder.none, isCollapsed: true),
+            // status only while connecting / offline: anything over the running video slows the browser
+            if (!_rtcOn || _offline)
+              Positioned(
+                left: 10,
+                top: 10,
+                child: IgnorePointer(
+                  child: _badge(
+                    _offline
+                        ? 'Нет связи…'
+                        : '${widget.info.name} · $_fps к/с${_rtcOn ? ' · видео' : ''}${_scale > 1 ? ' · ×${_scale.toStringAsFixed(1)}' : ''}',
+                    _offline,
+                  ),
+                ),
               ),
-            ),
-          ),
-        ],
-      );
-    });
+          ],
+        );
+      },
+    );
   }
 
   Widget _badge(String text, bool bad) => Container(
-        padding: const EdgeInsets.fromLTRB(10, 6, 12, 6),
-        decoration: BoxDecoration(color: K.ink.withValues(alpha: 0.72), borderRadius: BorderRadius.circular(30)),
-        child: Row(mainAxisSize: MainAxisSize.min, children: [
-          Container(
-              width: 8, height: 8, decoration: BoxDecoration(color: bad ? K.coral : K.lime, shape: BoxShape.circle)),
-          const SizedBox(width: 7),
-          Text(text, style: K.t(12, color: bad ? K.coral : K.white, w: FontWeight.w600)),
-        ]),
-      );
+    padding: const EdgeInsets.fromLTRB(10, 6, 12, 6),
+    decoration: BoxDecoration(color: K.ink.withValues(alpha: 0.72), borderRadius: BorderRadius.circular(30)),
+    child: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 8,
+          height: 8,
+          decoration: BoxDecoration(color: bad ? K.coral : K.lime, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 7),
+        Text(
+          text,
+          style: K.t(12, color: bad ? K.coral : K.white, w: FontWeight.w600),
+        ),
+      ],
+    ),
+  );
+
+  void _toggleSound() {
+    setState(() => _sound = !_sound);
+    _soundUnlocked = true;
+    unlockSound(muted: !_sound); // called from a tap, so the browser allows it
+    _renderer.muted = !_sound;
+    final stream = _renderer.srcObject;
+    if (stream != null) {
+      for (final t in stream.getAudioTracks()) {
+        t.enabled = _sound;
+      }
+    }
+    _dcSend({'t': 'sound', 'on': _sound});
+    _snack(_sound ? 'Звук с компьютера включён' : 'Звук выключен');
+  }
 
   List<DockAction> _actions() => [
-        DockAction(Icons.keyboard_rounded, 'Клавиатура', _toggleKeyboard, on: _kbFocus.hasFocus),
-        DockAction(Icons.keyboard_command_key_rounded, 'Клавиши', () => setState(() => _showKeys = !_showKeys),
-            on: _showKeys),
-        DockAction(_mode == TouchMode.direct ? Icons.touch_app_rounded : Icons.mouse_rounded,
-            _mode == TouchMode.direct ? 'Касание' : 'Тачпад', () {
-          setState(() => _mode = _mode == TouchMode.direct ? TouchMode.touchpad : TouchMode.direct);
-          _snack(_mode == TouchMode.direct
+    DockAction(_sound ? Icons.volume_up_rounded : Icons.volume_off_rounded, 'Звук', _toggleSound, on: _sound),
+    DockAction(Icons.keyboard_rounded, 'Клавиатура', _toggleKeyboard, on: _kbFocus.hasFocus),
+    DockAction(
+      Icons.keyboard_command_key_rounded,
+      'Клавиши',
+      () => setState(() => _showKeys = !_showKeys),
+      on: _showKeys,
+    ),
+    DockAction(
+      _mode == TouchMode.direct ? Icons.touch_app_rounded : Icons.mouse_rounded,
+      _mode == TouchMode.direct ? 'Касание' : 'Тачпад',
+      () {
+        setState(() => _mode = _mode == TouchMode.direct ? TouchMode.touchpad : TouchMode.direct);
+        _snack(
+          _mode == TouchMode.direct
               ? 'Касание: нажимайте прямо на нужное место'
-              : 'Тачпад: водите пальцем, курсор двигается как на ноутбуке');
-        }),
-        DockAction(Icons.pan_tool_alt_rounded, 'Тянуть', () {
-          setState(() => _dragLock = !_dragLock);
-          _snack(_dragLock ? 'Перетаскивание включено: ведите пальцем, чтобы тянуть' : 'Перетаскивание выключено');
-        }, on: _dragLock),
-        DockAction(Icons.swap_vert_rounded, 'Прокрутка', () {
-          setState(() {
-            _scrollMode = !_scrollMode;
-            if (_scrollMode) _dragLock = false;
-          });
-          _snack(_scrollMode
-              ? 'Прокрутка: ведите пальцем вверх/вниз, чтобы листать. Нажатия работают как обычно'
-              : 'Прокрутка выключена');
-        }, on: _scrollMode),
-        DockAction(Icons.ads_click_rounded, 'ПКМ', () => _send({'t': 'click', 'b': 'right'})),
-        DockAction(Icons.zoom_out_map_rounded, '1:1', () => setState(() {
-              _scale = 1;
-              _offset = Offset.zero;
-            })),
-        DockAction(Icons.high_quality_rounded, _qualities[_quality].label, () {
-          setState(() => _quality = (_quality + 1) % _qualities.length);
-          _sendQuality();
-          _snack('Качество: ${_qualities[_quality].label}');
-        }),
-        if (widget.info.monitors.length > 1)
-          DockAction(Icons.monitor_rounded, 'Монитор ${_monitor + 1}', () {
-            setState(() => _monitor = (_monitor + 1) % widget.info.monitors.length);
-            _sendQuality();
-            _snack('Монитор ${_monitor + 1}');
-          }),
-        DockAction(Icons.logout_rounded, 'Выйти', () => Navigator.of(context).pop()),
-      ];
+              : 'Тачпад: водите пальцем, курсор двигается как на ноутбуке',
+        );
+      },
+    ),
+    DockAction(Icons.pan_tool_alt_rounded, 'Тянуть', () {
+      setState(() => _dragLock = !_dragLock);
+      _snack(_dragLock ? 'Перетаскивание включено: ведите пальцем, чтобы тянуть' : 'Перетаскивание выключено');
+    }, on: _dragLock),
+    DockAction(Icons.swap_vert_rounded, 'Прокрутка', () {
+      setState(() {
+        _scrollMode = !_scrollMode;
+        if (_scrollMode) _dragLock = false;
+      });
+      _snack(
+        _scrollMode
+            ? 'Прокрутка: ведите пальцем вверх/вниз, чтобы листать. Нажатия работают как обычно'
+            : 'Прокрутка выключена',
+      );
+    }, on: _scrollMode),
+    DockAction(Icons.ads_click_rounded, 'ПКМ', () => _send({'t': 'click', 'b': 'right'})),
+    DockAction(
+      Icons.zoom_out_map_rounded,
+      '1:1',
+      () => setState(() {
+        _scale = 1;
+        _offset = Offset.zero;
+      }),
+    ),
+    DockAction(Icons.high_quality_rounded, _qualities[_quality].label, () {
+      setState(() => _quality = (_quality + 1) % _qualities.length);
+      _sendQuality();
+      _snack('Качество: ${_qualities[_quality].label}');
+    }),
+    if (widget.info.monitors.length > 1)
+      DockAction(Icons.monitor_rounded, 'Монитор ${_monitor + 1}', () {
+        setState(() => _monitor = (_monitor + 1) % widget.info.monitors.length);
+        _sendQuality();
+        _snack('Монитор ${_monitor + 1}');
+      }),
+    DockAction(Icons.logout_rounded, 'Выйти', () => Navigator.of(context).pop()),
+  ];
 
   void _snack(String s) {
     ScaffoldMessenger.of(context)
@@ -745,18 +839,22 @@ class _RemoteScreenState extends State<RemoteScreen> {
   }
 
   Widget _chip(String label, VoidCallback onTap, {bool on = false}) => Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 3),
-        child: KChip(label, onTap: onTap, bg: on ? K.lime : K.panel2, fg: on ? K.ink : K.white),
-      );
+    padding: const EdgeInsets.symmetric(horizontal: 3),
+    child: KChip(label, onTap: onTap, bg: on ? K.lime : K.panel2, fg: on ? K.ink : K.white),
+  );
 
   Widget _mod(String name, String label) => _chip(label, () {
-        setState(() => _mods.contains(name) ? _mods.remove(name) : _mods.add(name));
-      }, on: _mods.contains(name));
+    setState(() => _mods.contains(name) ? _mods.remove(name) : _mods.add(name));
+  }, on: _mods.contains(name));
 
   Widget _row(List<Widget> children) => SizedBox(
-        height: 44,
-        child: ListView(scrollDirection: Axis.horizontal, padding: const EdgeInsets.symmetric(horizontal: 4), children: children),
-      );
+    height: 44,
+    child: ListView(
+      scrollDirection: Axis.horizontal,
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      children: children,
+    ),
+  );
 
   /// One scrollable row of keys shown while the phone keyboard is open.
   /// TextFieldTapRegion keeps the keyboard open when these keys are tapped.
@@ -799,49 +897,55 @@ class _RemoteScreenState extends State<RemoteScreen> {
     return Container(
       margin: const EdgeInsets.fromLTRB(10, 6, 10, 0),
       padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
-      decoration: BoxDecoration(color: K.panel, borderRadius: BorderRadius.circular(26), border: Border.all(color: K.line)),
-      child: Column(children: [
-        _row([
-          _mod('ctrl', 'Ctrl'),
-          _mod('alt', 'Alt'),
-          _mod('shift', 'Shift'),
-          _mod('win', 'Win'),
-          _chip('Esc', () => _key(['esc'])),
-          _chip('Tab', () => _key(['tab'])),
-          _chip('Enter', () => _key(['enter'])),
-          _chip('⌫', () => _key(['backspace'])),
-          _chip('Del', () => _key(['delete'])),
-          _chip('←', () => _key(['left'])),
-          _chip('↑', () => _key(['up'])),
-          _chip('↓', () => _key(['down'])),
-          _chip('→', () => _key(['right'])),
-          _chip('Home', () => _key(['home'])),
-          _chip('End', () => _key(['end'])),
-          _chip('PgUp', () => _key(['pageup'])),
-          _chip('PgDn', () => _key(['pagedown'])),
-          for (var i = 1; i <= 12; i++) _chip('F$i', () => _key(['f$i'])),
-        ]),
-        _row([
-          _chip('Пуск', () => _key(['win'])),
-          _chip('Копировать', () => _key(['ctrl', 'c'])),
-          _chip('Вставить', () => _key(['ctrl', 'v'])),
-          _chip('Вырезать', () => _key(['ctrl', 'x'])),
-          _chip('Отменить', () => _key(['ctrl', 'z'])),
-          _chip('Выделить всё', () => _key(['ctrl', 'a'])),
-          _chip('Сохранить', () => _key(['ctrl', 's'])),
-          _chip('Alt+Tab', () => _key(['alt', 'tab'])),
-          _chip('Закрыть окно', () => _key(['alt', 'f4'])),
-          _chip('Рабочий стол', () => _key(['win', 'd'])),
-          _chip('Проводник', () => _key(['win', 'e'])),
-          _chip('Выполнить', () => _key(['win', 'r'])),
-          _chip('Диспетчер задач', () => _key(['ctrl', 'shift', 'esc'])),
-          _chip('Смена языка', () => _key(['alt', 'shift'])),
-          _chip('🔉', () => _key(['volumedown'])),
-          _chip('🔊', () => _key(['volumeup'])),
-          _chip('🔇', () => _key(['volumemute'])),
-          _chip('⏯', () => _key(['mediaplay'])),
-        ]),
-      ]),
+      decoration: BoxDecoration(
+        color: K.panel,
+        borderRadius: BorderRadius.circular(26),
+        border: Border.all(color: K.line),
+      ),
+      child: Column(
+        children: [
+          _row([
+            _mod('ctrl', 'Ctrl'),
+            _mod('alt', 'Alt'),
+            _mod('shift', 'Shift'),
+            _mod('win', 'Win'),
+            _chip('Esc', () => _key(['esc'])),
+            _chip('Tab', () => _key(['tab'])),
+            _chip('Enter', () => _key(['enter'])),
+            _chip('⌫', () => _key(['backspace'])),
+            _chip('Del', () => _key(['delete'])),
+            _chip('←', () => _key(['left'])),
+            _chip('↑', () => _key(['up'])),
+            _chip('↓', () => _key(['down'])),
+            _chip('→', () => _key(['right'])),
+            _chip('Home', () => _key(['home'])),
+            _chip('End', () => _key(['end'])),
+            _chip('PgUp', () => _key(['pageup'])),
+            _chip('PgDn', () => _key(['pagedown'])),
+            for (var i = 1; i <= 12; i++) _chip('F$i', () => _key(['f$i'])),
+          ]),
+          _row([
+            _chip('Пуск', () => _key(['win'])),
+            _chip('Копировать', () => _key(['ctrl', 'c'])),
+            _chip('Вставить', () => _key(['ctrl', 'v'])),
+            _chip('Вырезать', () => _key(['ctrl', 'x'])),
+            _chip('Отменить', () => _key(['ctrl', 'z'])),
+            _chip('Выделить всё', () => _key(['ctrl', 'a'])),
+            _chip('Сохранить', () => _key(['ctrl', 's'])),
+            _chip('Alt+Tab', () => _key(['alt', 'tab'])),
+            _chip('Закрыть окно', () => _key(['alt', 'f4'])),
+            _chip('Рабочий стол', () => _key(['win', 'd'])),
+            _chip('Проводник', () => _key(['win', 'e'])),
+            _chip('Выполнить', () => _key(['win', 'r'])),
+            _chip('Диспетчер задач', () => _key(['ctrl', 'shift', 'esc'])),
+            _chip('Смена языка', () => _key(['alt', 'shift'])),
+            _chip('🔉', () => _key(['volumedown'])),
+            _chip('🔊', () => _key(['volumeup'])),
+            _chip('🔇', () => _key(['volumemute'])),
+            _chip('⏯', () => _key(['mediaplay'])),
+          ]),
+        ],
+      ),
     );
   }
 }

@@ -27,8 +27,15 @@ import mss
 from PIL import Image, ImageChops, ImageDraw
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# Packed into RemoteDesk.exe: the phone app is inside the exe, and settings (the key) live in
+# %APPDATA%\RemoteDesk so every person who runs the exe gets their own key.
+FROZEN = getattr(sys, "frozen", False)
+if FROZEN:
+    HERE = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "RemoteDesk")
+    os.makedirs(HERE, exist_ok=True)
 CONFIG = os.path.join(HERE, "config.json")
-WEB_DIR = os.path.join(os.path.dirname(HERE), "web")
+WEB_DIR = (os.path.join(sys._MEIPASS, "web") if FROZEN
+           else os.path.join(os.path.dirname(HERE), "web"))
 PORT = 8765
 
 user32 = ctypes.windll.user32
@@ -569,6 +576,23 @@ def _shortcuts():
     return found
 
 
+def all_apps():
+    """Every program the phone can open: the main ones first, then all Start Menu / Desktop shortcuts."""
+    out, seen = [], set()
+    for title, aliases, target in BUILTIN_APPS:
+        if isinstance(target, str) and os.path.isabs(target) and not os.path.exists(target):
+            continue  # not installed on this PC
+        out.append({"name": title, "cmd": aliases[0], "main": True})
+        seen.add(title.lower())
+        seen.update(a.lower() for a in aliases)
+    names = sorted({os.path.splitext(os.path.basename(p))[0] for p in _shortcuts().values()}, key=str.lower)
+    for n in names:
+        if n.lower() not in seen:
+            seen.add(n.lower())
+            out.append({"name": n, "cmd": "open " + n, "main": False})
+    return out
+
+
 def re_skip(name):
     n = name.lower()
     return any(w in n for w in ("uninstall", "удал", "readme", "help", "documentation", "release notes",
@@ -858,7 +882,7 @@ def list_windows():
         return "Открытых окон нет."
     lines = [f"  {i:>2}. {_app_name(w)} — {w['title'][:70]}" for i, w in enumerate(LAST_WINDOWS, 1)]
     return ("ОТКРЫТЫЕ ОКНА:\n" + "\n".join(lines)
-            + "\n\nЗакрыть:  закрыть 2   ·   закрыть opera   ·   если зависло: закрыть принудительно 2")
+            + "\n\nЗакрыть:  close 2   ·   close opera   ·   если зависло: close force 2")
 
 
 def close_windows(query, force=False):
@@ -866,14 +890,14 @@ def close_windows(query, force=False):
     targets = match_windows(query, wins)
     if not targets:
         return (f"Не нашёл открытое окно «{query}».\n"
-                "Напишите «открытые», чтобы увидеть список, и закройте по номеру:  закрыть 3")
+                "Напишите «windows», чтобы увидеть список, и закройте по номеру:  close 3")
     names = sorted({_app_name(w) for w in targets})
     if force:
         exes = {w["exe"].lower() for w in targets}
         bad = exes & NEVER_FORCE
         if bad:
             return ("Проводник и служебные программы принудительно не закрываю — пропадёт панель задач "
-                    "или связь с ноутбуком.\nЗакройте обычно:  закрыть " + query)
+                    "или связь с ноутбуком.\nЗакройте обычно:  close " + query)
         out = []
         for pid in sorted({w["pid"] for w in targets}):
             p = subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True,
@@ -889,33 +913,33 @@ def close_windows(query, force=False):
     msg = f"Закрываю: {', '.join(names)}  (окон: {len(targets)})"
     if still:
         msg += (f"\n{len(still)} окно(а) ещё открыто — программа, наверное, спрашивает «Сохранить?».\n"
-                "Ответьте во вкладке «Экран» или закройте без сохранения:  закрыть принудительно " + query)
+                "Ответьте во вкладке «Экран» или закройте без сохранения:  close force " + query)
     else:
         msg += "\nГотово, закрыто."
     return msg
 
 
-HELP = """КОМАНДЫ (можно писать по-русски)
+HELP = """КОМАНДЫ (на английском; русские тоже работают)
 
-  программы            — список программ, которые можно открыть
-  открыть <программа>  — открыть программу:  открыть opera,  открыть streak
+  apps                 — список программ, которые можно открыть
+  open <программа>     — открыть программу:  open opera,  open streak
   <программа>          — то же самое коротко:  opera,  vscode,  cmd,  unity hub
 
-  открытые             — какие окна сейчас открыты (с номерами)
-  закрыть <программа>  — закрыть, как крестиком:  закрыть opera,  закрыть 3
-  закрыть принудительно <программа> — если программа зависла (без сохранения!)
+  windows              — какие окна сейчас открыты (с номерами)
+  close <программа>    — закрыть, как крестиком:  close opera,  close 3
+  close force <программа> — если программа зависла (без сохранения!)
 
-  проекты              — список папок и проектов с номерами
-  перейти <номер>      — зайти в папку проекта (тут будут выполняться команды)
-  файлы                — что лежит в текущей папке
-  папка [номер]        — открыть папку в Проводнике
-  открыть <файл>       — открыть файл из текущей папки
+  projects             — список папок и проектов с номерами
+  go <номер>           — зайти в папку проекта (тут будут выполняться команды)
+  files                — что лежит в текущей папке
+  folder [номер]       — открыть папку в Проводнике
+  open <файл>          — открыть файл из текущей папки
 
   vscode <номер>       — открыть проект в VS Code
   claude <номер>       — открыть Claude Code в окне на ноутбуке (смотрите во вкладке «Экран»)
-  спроси <вопрос>      — спросить Claude прямо здесь, в текущей папке
+  ask <вопрос>         — спросить Claude прямо здесь, в текущей папке
                          (он может читать и менять файлы проекта)
-  новый чат            — следующий «спроси» начнёт разговор с Claude заново
+  new chat             — следующий «ask» начнёт разговор с Claude заново
 
   unity                — открыть Unity Hub
   unity <номер>        — открыть проект в Unity
@@ -937,17 +961,17 @@ def friendly(cmd, cwd):
 
     if low in ("помощь", "help", "команды", "?"):
         return res(HELP)
-    if low in ("программы", "приложения", "apps"):
+    if low in ("программы", "приложения", "apps", "programs"):
         names = [f"  {t:<18} — {', '.join(a[:3])}" for t, a, _ in BUILTIN_APPS]
         sc = sorted({os.path.splitext(os.path.basename(p))[0] for p in _shortcuts().values()})
-        return res("ГЛАВНЫЕ (открыть <имя>):\n" + "\n".join(names)
-                   + "\n\nВСЕ ЯРЛЫКИ ИЗ МЕНЮ ПУСК:\n  " + ", ".join(sc))
+        return res("ГЛАВНЫЕ (open <имя>):\n" + "\n".join(names)
+                   + "\n\nВСЕ ЯРЛЫКИ ИЗ МЕНЮ ПУСК (open <имя>):\n  " + ", ".join(sc))
     if low in ("проекты", "папки проектов", "места", "projects"):
         lines = [f"  {p['n']:>2}. {p['name']}{'  [Unity]' if p['unity'] else ''}\n      {p['path']}"
                  for p in places()]
         return res("ПАПКИ И ПРОЕКТЫ:\n" + "\n".join(lines)
-                   + "\n\nНапример:  перейти 4   ·   claude 4   ·   vscode 4   ·   папка 4")
-    if low in ("файлы", "ls", "список"):
+                   + "\n\nНапример:  go 4   ·   claude 4   ·   vscode 4   ·   folder 4")
+    if low in ("файлы", "ls", "список", "files"):
         try:
             entries = sorted((n for n in os.listdir(cwd) if not n.startswith((".", "$"))
                               and n not in ("Application Data", "Local Settings", "NTUSER.DAT", "ntuser.ini",
@@ -958,7 +982,7 @@ def friendly(cmd, cwd):
             return res(str(e))
         lines = [("📁 " if os.path.isdir(os.path.join(cwd, n)) else "   ") + n for n in entries[:200]]
         return res(f"{cwd}\n" + ("\n".join(lines) or "(пусто)"))
-    if low in ("открытые", "окна", "запущено", "что открыто", "открытые окна", "windows"):
+    if low in ("открытые", "окна", "запущено", "что открыто", "открытые окна", "windows", "opened", "open windows"):
         return res(list_windows())
     if w in ("закрыть", "закрой", "close", "убить", "kill"):
         force = w in ("убить", "kill")
@@ -967,39 +991,39 @@ def friendly(cmd, cwd):
             if q.lower().startswith(word):
                 force, q = True, q[len(word):].strip()
         if not q:
-            return res("Что закрыть? Например:  закрыть opera   ·   «открытые» — список окон с номерами")
+            return res("Что закрыть? Например:  close opera   ·   «windows» — список окон с номерами")
         return res(close_windows(q, force))
-    if low == "новый чат":
+    if low in ("новый чат", "new chat"):
         CLAUDE_CHATS.discard(cwd.lower())
-        return res("Следующий вопрос «спроси …» начнёт новый разговор с Claude.")
+        return res("Следующий вопрос «ask …» начнёт новый разговор с Claude.")
     if w in ("спроси", "ask", "claude:"):
         if not rest:
-            return res("Напишите вопрос после слова «спроси», например:  спроси что делает этот проект?")
+            return res("Напишите вопрос после слова «ask», например:  ask что делает этот проект?")
         return res(ask_claude(rest, cwd))
     if w in ("перейти", "зайти", "go"):
         p = resolve_place(rest, cwd)
         if not p or not os.path.isdir(p):
-            return res(f"Не нашёл папку «{rest}». Напишите «проекты», чтобы увидеть список.")
+            return res(f"Не нашёл папку «{rest}». Напишите «projects», чтобы увидеть список.")
         return res(f"Теперь вы в папке: {p}", p)
     if w in ("папка", "folder"):
         p = resolve_place(rest, cwd)
         if not p:
-            return res(f"Не нашёл папку «{rest}». Напишите «проекты».")
+            return res(f"Не нашёл папку «{rest}». Напишите «projects».")
         os.startfile(p)
         return res(f"Открыл в Проводнике: {p}")
     if w in ("vscode", "vsc", "code") and rest:
         p = resolve_place(rest, cwd)
         if not p:
-            return res(f"Не нашёл «{rest}». Напишите «проекты».")
+            return res(f"Не нашёл «{rest}». Напишите «projects».")
         launch(BUILTIN_APPS[2][2], p)
         return res(f"Открываю в VS Code: {p}")
     if w in ("claude", "клод"):
         p = resolve_place(rest, cwd) if rest else cwd
         if not p:
-            return res(f"Не нашёл «{rest}». Напишите «проекты».")
+            return res(f"Не нашёл «{rest}». Напишите «projects».")
         open_claude(p)
         return res(f"Открыл Claude Code в папке {p}\nОкно появилось на ноутбуке — работайте с ним во вкладке «Экран».\n"
-                   "Или задавайте вопросы прямо отсюда:  спроси <вопрос>")
+                   "Или задавайте вопросы прямо отсюда:  ask <вопрос>")
     if w in ("unity", "юнити") and low not in ("unity hub", "юнити хаб"):
         if not rest:
             p = cwd if is_unity(cwd) else None
@@ -1011,7 +1035,7 @@ def friendly(cmd, cwd):
             p = resolve_place(rest, cwd)
         if not p or not is_unity(p):
             return res(f"«{rest}» — не проект Unity (нет папок Assets и ProjectSettings). Проекты Unity "
-                       "в списке «проекты» помечены [Unity].")
+                       "в списке «projects» помечены [Unity].")
         exe = unity_editor(p)
         if not exe:
             return res("Не нашёл установленный редактор Unity.")
@@ -1019,14 +1043,14 @@ def friendly(cmd, cwd):
         return res(f"Открываю в Unity: {p}\n(загрузка может занять минуту)")
     if w in ("открыть", "открой", "запусти", "запустить", "open", "start"):
         if not rest:
-            return res("Что открыть? Например:  открыть opera   ·   «программы» — весь список")
+            return res("Что открыть? Например:  open opera   ·   «apps» — весь список")
         f = os.path.join(cwd, rest.strip('"'))
         if os.path.exists(f):
             os.startfile(f)
             return res(f"Открываю: {f}")
         app = find_app(rest)
         if not app:
-            return res(f"Не нашёл программу «{rest}». Напишите «программы», чтобы увидеть список.")
+            return res(f"Не нашёл программу «{rest}». Напишите «apps», чтобы увидеть список.")
         launch(app[1], cwd)
         return res(f"Открываю {app[0]}")
     if " " not in low or any(low == a for _, aliases, _ in BUILTIN_APPS for a in aliases):
@@ -1165,6 +1189,8 @@ class Handler(BaseHTTPRequestHandler):
                 })
             if u.path == "/api/places":
                 return self._json(places())
+            if u.path == "/api/apps":
+                return self._json(all_apps())
             if u.path == "/api/stream":
                 settings = (int(q.get("m", ["0"])[0]), int(q.get("w", ["1280"])[0]),
                             max(10, min(95, int(q.get("q", ["60"])[0]))))
@@ -1337,7 +1363,63 @@ def start_rtc():
         print(f"  [!] Быстрое видео выключено ({e}). Установите: pip install aiortc")
 
 
+TAILSCALE_URL = "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe"
+
+
+def tailscale_exe():
+    for base in (os.environ.get("ProgramFiles", r"C:\Program Files"), os.environ.get("ProgramFiles(x86)", "")):
+        p = os.path.join(base, "Tailscale", "tailscale.exe")
+        if base and os.path.exists(p):
+            return p
+    return None
+
+
+def install_tailscale():
+    """Downloads the official Tailscale installer (always the newest) and starts it."""
+    import urllib.request
+    dst = os.path.join(os.environ.get("TEMP") or HERE, "tailscale-setup.exe")
+    print("  Скачиваю Tailscale с официального сайта (pkgs.tailscale.com)…")
+    try:
+        urllib.request.urlretrieve(TAILSCALE_URL, dst)
+    except Exception as e:
+        print(f"  [!] Не получилось скачать ({e}). Скачайте вручную: https://tailscale.com/download")
+        return
+    print("  Запускаю установщик — следуйте шагам, затем войдите в Tailscale (значок у часов).")
+    print("  Тот же аккаунт Tailscale включите на телефоне — и адрес 100.x.x.x будет работать откуда угодно.")
+    try:
+        os.startfile(dst)
+    except Exception as e:
+        print(f"  [!] Не удалось запустить установщик: {e}")
+
+
+def tailscale_hint():
+    """Explains remote access and offers to install Tailscale when it is missing."""
+    if tailscale_exe():
+        if not any(ip.startswith("100.") for ip in local_ips()):
+            print("  НЕ ИЗ ДОМА: Tailscale установлен, но не подключён — войдите в него (значок у часов).")
+            print("=" * 60)
+        return
+    print("  НЕ ИЗ ДОМА (мобильный интернет, другой Wi-Fi): нужен бесплатный Tailscale.")
+    print("  Нажмите Enter в этом окне — программа скачает и установит его.")
+    print("=" * 60)
+
+    def wait_enter():
+        try:
+            input()
+        except Exception:
+            return
+        install_tailscale()
+
+    threading.Thread(target=wait_enter, daemon=True, name="tailscale").start()
+
+
 def main():
+    try:  # show every line at once, also when the window output is redirected
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+    if FROZEN:
+        os.system("title RemoteDesk")
     port = int(CFG.get("port", PORT))
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     srv.daemon_threads = True
@@ -1361,6 +1443,7 @@ def main():
     print(f"  Журнал входов: {LOG_FILE}")
     print("  Закройте это окно, чтобы выключить доступ.")
     print("=" * 60)
+    tailscale_hint()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

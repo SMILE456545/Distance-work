@@ -1,9 +1,20 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'api.dart';
 import 'kraken/kraken.dart';
 import 'main.dart' show homeTabs;
+
+/// One terminal tab: its own output, folder and scroll position.
+class _Session {
+  final int id;
+  final List<_Entry> log = [];
+  String cwd;
+  bool busy = false;
+  final scroll = ScrollController();
+  _Session(this.id, this.cwd);
+}
 
 class _Entry {
   final String cwd;
@@ -29,45 +40,47 @@ const _chipColors = [
 /// Quick-launch buttons. Each one just types its command, so the user sees
 /// (and learns) what to write next time.
 const _apps = <(IconData, String, String)>[
-  (Icons.cancel_presentation, 'Открытые окна', 'открытые'),
+  (Icons.cancel_presentation, 'Открытые окна', 'windows'),
   (Icons.public, 'Opera', 'opera'),
   (Icons.local_fire_department, 'Streak', 'streak'),
   (Icons.code, 'VS Code', 'vscode'),
   (Icons.smart_toy_outlined, 'Claude Code', 'claude'),
   (Icons.sports_esports_outlined, 'Unity Hub', 'unity'),
   (Icons.terminal, 'CMD', 'cmd'),
-  (Icons.desktop_windows_outlined, 'Рабочий стол', 'рабочий стол'),
-  (Icons.folder_open, 'Проводник', 'проводник'),
-  (Icons.download, 'Загрузки', 'загрузки'),
-  (Icons.monitor_heart_outlined, 'Диспетчер задач', 'диспетчер задач'),
+  (Icons.desktop_windows_outlined, 'Рабочий стол', 'desktop'),
+  (Icons.folder_open, 'Проводник', 'explorer'),
+  (Icons.download, 'Загрузки', 'downloads'),
+  (Icons.monitor_heart_outlined, 'Диспетчер задач', 'taskmgr'),
 ];
 
 /// Explanation shown under the input while typing.
 const _hints = <String, String>{
-  'помощь': 'Покажет список всех команд',
-  'программы': 'Покажет все программы, которые можно открыть',
-  'открыть': 'открыть <программа или файл>  — например: открыть opera, открыть steam, открыть отчет.docx',
-  'открой': 'открой <программа>  — например: открой telegram',
-  'открытые': 'Покажет открытые окна с номерами — потом можно закрыть: закрыть 3',
-  'окна': 'Покажет открытые окна с номерами',
-  'закрыть': 'закрыть <программа или номер>  — как нажать ✕: закрыть opera, закрыть 3. '
-      'Если зависла: закрыть принудительно opera (несохранённое пропадёт)',
-  'закрой': 'закрой <программа или номер>  — например: закрой vscode',
-  'убить': 'убить <программа>  — то же, что «закрыть принудительно»: без сохранения',
-  'проекты': 'Покажет ваши папки и проекты с номерами',
-  'перейти': 'перейти <номер или название>  — зайти в папку проекта, например: перейти 10',
-  'файлы': 'Покажет, что лежит в текущей папке',
-  'папка': 'папка [номер]  — открыть папку в Проводнике на ноутбуке. Без номера — текущую',
+  'help': 'Покажет список всех команд',
+  'apps': 'Покажет все программы, которые можно открыть',
+  'open': 'open <программа или файл>  — например: open opera, open steam, open report.docx',
+  'windows': 'Покажет открытые окна с номерами — потом можно закрыть: close 3',
+  'close': 'close <программа или номер>  — как нажать ✕: close opera, close 3. '
+      'Если зависла: close force opera (несохранённое пропадёт)',
+  'kill': 'kill <программа>  — то же, что «close force»: без сохранения',
+  'projects': 'Покажет ваши папки и проекты с номерами',
+  'go': 'go <номер или название>  — зайти в папку проекта, например: go 10',
+  'files': 'Покажет, что лежит в текущей папке',
+  'folder': 'folder [номер]  — открыть папку в Проводнике на ноутбуке. Без номера — текущую',
   'vscode': 'vscode <номер>  — открыть проект в VS Code. Без номера — просто открыть VS Code',
   'claude': 'claude <номер>  — открыть Claude Code в окне на ноутбуке (работать с ним во вкладке «Экран»)',
-  'спроси': 'спроси <вопрос>  — Claude ответит прямо здесь и может менять файлы в текущей папке',
-  'новый': 'новый чат  — начать разговор с Claude заново',
+  'ask': 'ask <вопрос>  — Claude ответит прямо здесь и может менять файлы в текущей папке',
+  'new': 'new chat  — начать разговор с Claude заново',
   'unity': 'unity <номер>  — открыть проект в Unity. Без номера — открыть Unity Hub',
   'cd': 'cd <папка>  — перейти в папку (cd .. — на уровень выше)',
-  'dir': 'Список файлов (команда PowerShell). Проще: файлы',
+  'dir': 'Список файлов (команда PowerShell). Проще: files',
+  'clear': 'Очистить экран терминала',
   'opera': 'Откроет браузер Opera',
   'streak': 'Откроет Streak',
   'cmd': 'Откроет окно командной строки на ноутбуке в текущей папке',
+  'desktop': 'Откроет папку «Рабочий стол»',
+  'explorer': 'Откроет Проводник',
+  'downloads': 'Откроет папку «Загрузки»',
+  'taskmgr': 'Откроет Диспетчер задач',
 };
 
 class TerminalScreen extends StatefulWidget {
@@ -83,15 +96,30 @@ class TerminalScreen extends StatefulWidget {
 
 class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAliveClientMixin {
   final _ctrl = TextEditingController();
-  final _scroll = ScrollController();
   final _focus = FocusNode();
-  final List<_Entry> _log = [];
   final List<String> _history = [];
   int _histPos = 0;
-  late String _cwd = widget.info.home;
-  bool _busy = false;
-  String _hint = '';
+  late final List<_Session> _tabs = [_Session(1, widget.info.home)];
+  int _tab = 0;
+  int _tabSeq = 1;
+  _Session get _s => _tabs[_tab.clamp(0, _tabs.length - 1)];
+  List<_Entry> get _log => _s.log;
+  String get _cwd => _s.cwd;
+  bool get _busy => _s.busy;
+  ScrollController get _scroll => _s.scroll;
+  final _hint = ValueNotifier<String>('');
+  // Rebuilding the output on every key press made typing lag on phones:
+  // the heavy parts are built once and reused until they really change.
+  Widget? _logCache, _appsCache, _cmdsCache;
+  int? _logKey, _appsKey, _cmdsKey;
   bool _dockOpen = true;
+  // keeps the input field the same widget while rows above it appear/disappear,
+  // otherwise it is rebuilt and the phone keyboard closes after one letter
+  final _inputKey = GlobalKey();
+  int _themeIdx = 0;
+  double _fontSize = 14;
+  int _monoFont = 0;
+  List<(String, String, bool)>? _pcApps; // every program on the PC, from the server
 
   @override
   bool get wantKeepAlive => true;
@@ -100,42 +128,50 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
   void initState() {
     super.initState();
     _ctrl.addListener(_updateHint);
-    _focus.addListener(() {
-      if (mounted) setState(() {});
-    });
+    _loadLook();
+    _loadApps();
   }
 
   /// Commands shown in the carousel above the keyboard.
   /// Ending with a space = needs a word after it, so it is only inserted.
   static const _quick = [
-    'помощь', 'открытые', 'закрыть ', 'открыть ', 'проекты', 'перейти ', 'файлы',
-    'папка', 'vscode ', 'claude ', 'спроси ', 'unity', 'cd ..', 'программы', 'очистить',
+    'help', 'windows', 'close ', 'open ', 'projects', 'go ', 'files',
+    'folder', 'vscode ', 'claude ', 'ask ', 'unity', 'cd ..', 'apps', 'clear',
   ];
 
   Widget _cmdCarousel() {
     final recent = _history.reversed.take(5).toList();
     Widget chip(String label, {bool past = false}) => Padding(
           padding: const EdgeInsets.only(right: 6),
-          child: KChip(
-            label.trim(),
-            icon: past ? Icons.history : null,
-            style: _mono.copyWith(fontSize: 12, color: past ? Colors.white70 : _green),
-            fg: Colors.white70,
-            onTap: () {
-              if (label.endsWith(' ')) {
-                _insert(label); // needs a name/number after it
-              } else {
-                _run(label);
-              }
-            },
+          child: Material(
+            color: _boxBg,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8), side: BorderSide(color: _boxLine)),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(8),
+              onTap: () {
+                if (label.endsWith(' ')) {
+                  _insert(label); // needs a name/number after it
+                } else {
+                  _run(label);
+                }
+              },
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  Text(past ? '↺ ' : '› ', style: K.code(12.5, color: past ? _termFg.withValues(alpha: 0.5) : K.lime)),
+                  Text(label.trim(), style: K.code(12.5, color: _termFg, w: FontWeight.w700)),
+                  if (label.endsWith(' '))
+                    Text(' …', style: K.code(12.5, color: _termFg.withValues(alpha: 0.45))),
+                ]),
+              ),
+            ),
           ),
         );
     return TextFieldTapRegion(
       child: SizedBox(
-        height: 40,
+        height: 32,
         child: ListView(
           scrollDirection: Axis.horizontal,
-          padding: const EdgeInsets.only(bottom: 4),
           children: [
             for (final c in recent) chip(c, past: true),
             for (final c in _quick) chip(c),
@@ -151,9 +187,9 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
     if (t.isNotEmpty) {
       final first = t.split(' ').first;
       h = _hints[first] ?? _hints.entries.firstWhere((e) => e.key.startsWith(t), orElse: () => const MapEntry('', '')).value;
-      if (h.isEmpty) h = 'Команда PowerShell. Напишите «помощь», чтобы увидеть простые команды';
+      if (h.isEmpty) h = 'Команда PowerShell. Напишите «help», чтобы увидеть простые команды';
     }
-    if (h != _hint) setState(() => _hint = h);
+    _hint.value = h;
   }
 
   Future<void> _run(String cmd) async {
@@ -164,10 +200,11 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
       _ctrl.clear();
       return;
     }
-    final e = _Entry(_cwd, cmd);
+    final ses = _s; // the answer goes to the tab the command was typed in
+    final e = _Entry(ses.cwd, cmd);
     setState(() {
-      _log.add(e);
-      _busy = true;
+      ses.log.add(e);
+      ses.busy = true;
       _history.remove(cmd);
       _history.add(cmd);
       _histPos = _history.length;
@@ -175,15 +212,15 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
     _ctrl.clear();
     _toBottom();
     try {
-      final (out, cwd) = await widget.api.cmd(cmd, _cwd);
+      final (out, cwd) = await widget.api.cmd(cmd, ses.cwd);
       e.output = out;
-      _cwd = cwd;
+      ses.cwd = cwd;
     } catch (err) {
       e.output = 'Ошибка: $err';
       e.error = true;
     }
     if (!mounted) return;
-    setState(() => _busy = false);
+    setState(() => ses.busy = false);
     _toBottom();
   }
 
@@ -243,38 +280,38 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
               ('streak', 'Streak'),
               ('vscode', 'VS Code'),
               ('cmd', 'командная строка'),
-              ('рабочий стол', 'папка «Рабочий стол»'),
-              ('открыть steam', 'любая программа из меню «Пуск»'),
-              ('программы', 'весь список программ'),
+              ('desktop', 'папка «Рабочий стол»'),
+              ('open steam', 'любая программа из меню «Пуск»'),
+              ('apps', 'весь список программ'),
             ], ctx),
             _section('Закрыть программу', [
-              ('открытые', 'список открытых окон с номерами'),
-              ('закрыть opera', 'закрыть, как крестиком ✕'),
-              ('закрыть 3', 'закрыть окно №3 из списка «открытые»'),
-              ('закрыть принудительно opera', 'если программа зависла (несохранённое пропадёт)'),
+              ('windows', 'список открытых окон с номерами'),
+              ('close opera', 'закрыть, как крестиком ✕'),
+              ('close 3', 'закрыть окно №3 из списка «windows»'),
+              ('close force opera', 'если программа зависла (несохранённое пропадёт)'),
             ], ctx),
             _section('2. Папки и проекты', [
-              ('проекты', 'список проектов с номерами'),
-              ('перейти 10', 'зайти в проект №10'),
-              ('файлы', 'что лежит в текущей папке'),
-              ('папка', 'открыть текущую папку в Проводнике'),
-              ('открыть README.md', 'открыть файл из текущей папки'),
+              ('projects', 'список проектов с номерами'),
+              ('go 10', 'зайти в проект №10'),
+              ('files', 'что лежит в текущей папке'),
+              ('folder', 'открыть текущую папку в Проводнике'),
+              ('open README.md', 'открыть файл из текущей папки'),
               ('cd ..', 'выйти на папку выше'),
             ], ctx),
             _section('3. Работа с проектом', [
               ('vscode 10', 'открыть проект №10 в VS Code'),
               ('claude 10', 'Claude Code в окне на ноутбуке (смотрите во вкладке «Экран»)'),
-              ('спроси что делает этот проект?', 'Claude ответит прямо здесь'),
-              ('спроси исправь ошибку в main.dart', 'Claude может менять файлы текущей папки'),
-              ('новый чат', 'начать разговор с Claude заново'),
+              ('ask что делает этот проект?', 'Claude ответит прямо здесь'),
+              ('ask исправь ошибку в main.dart', 'Claude может менять файлы текущей папки'),
+              ('new chat', 'начать разговор с Claude заново'),
             ], ctx),
             _section('4. Unity', [
               ('unity', 'открыть Unity Hub'),
               ('unity 9', 'открыть проект №9 в Unity (в списке помечены [Unity])'),
             ], ctx),
             _section('5. Полезное', [
-              ('помощь', 'список всех команд'),
-              ('очистить', 'очистить экран терминала'),
+              ('help', 'список всех команд'),
+              ('clear', 'очистить экран терминала'),
               ('ipconfig', 'любая команда PowerShell тоже работает'),
             ], ctx),
             const SizedBox(height: 12),
@@ -369,8 +406,8 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
                     Text(p.path, style: const TextStyle(color: Colors.white38, fontSize: 11), overflow: TextOverflow.ellipsis),
                     const SizedBox(height: 10),
                     Wrap(spacing: 6, runSpacing: 6, children: [
-                      _act(ctx, 'Перейти', 'перейти ${p.n}'),
-                      _act(ctx, 'Проводник', 'папка ${p.n}'),
+                      _act(ctx, 'Перейти', 'go ${p.n}'),
+                      _act(ctx, 'Проводник', 'folder ${p.n}'),
                       _act(ctx, 'VS Code', 'vscode ${p.n}'),
                       _act(ctx, 'Claude', 'claude ${p.n}'),
                       if (p.unity) _act(ctx, 'Unity', 'unity ${p.n}'),
@@ -395,113 +432,353 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
       );
 
   // ------------------------------------------------------------ UI
-  Widget _welcome() => ListView(
-        padding: const EdgeInsets.all(20),
-        children: [
-          Text('С чего начать', style: K.h(22)),
-          const SizedBox(height: 8),
-          Text(
-            'Здесь можно открывать программы, папки и проекты простыми словами. '
-            'Нажмите на пример или кнопку сверху.',
-            style: K.t(14, color: K.muted, height: 1.4),
-          ),
-          const SizedBox(height: 16),
-          for (final (cmd, what) in const [
-            ('помощь', 'все команды'),
-            ('opera', 'открыть Opera'),
-            ('закрыть opera', 'закрыть Opera'),
-            ('открытые', 'какие окна открыты'),
-            ('проекты', 'список проектов'),
-            ('vscode 10', 'проект №10 в VS Code'),
-            ('claude 10', 'Claude Code в проекте №10'),
-            ('спроси что тут за файлы?', 'вопрос Claude прямо отсюда'),
-            ('unity', 'открыть Unity Hub'),
-          ])
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 4),
-              child: InkWell(
-                onTap: () => _insert(cmd),
-                borderRadius: BorderRadius.circular(18),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
-                  decoration: BoxDecoration(color: K.panel, borderRadius: BorderRadius.circular(18)),
-                  child: Row(children: [
-                    Text(cmd, style: _mono.copyWith(color: _green, fontWeight: FontWeight.w700)),
-                    const SizedBox(width: 10),
-                    Expanded(child: Text(what, style: K.t(13, color: K.muted))),
-                    const Icon(Icons.north_east_rounded, size: 16, color: K.muted),
-                  ]),
+  // ------------------------------------------------------------ terminal look (user can change it)
+  _TermTheme get _t => _termThemes[_themeIdx.clamp(0, _termThemes.length - 1)];
+  Color get _termBg => _t.bg;
+  Color get _termFg => _t.fg;
+  Color get _termErr => _t.err;
+  Color get _boxBg => Color.lerp(_t.bg, _t.fg, 0.07)!;
+  Color get _boxLine => Color.lerp(_t.bg, _t.fg, 0.18)!;
+  TextStyle get _ps => (_monoFont == 0
+          ? K.code(_fontSize, color: _termFg)
+          : TextStyle(
+              fontFamily: 'Consolas',
+              fontFamilyFallback: const ['Menlo', 'Courier New', 'monospace'],
+              fontSize: _fontSize,
+              color: _termFg))
+      .copyWith(height: 1.45);
+
+  Future<void> _loadLook() async {
+    final p = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    setState(() {
+      _themeIdx = p.getInt('term_theme') ?? 0;
+      _fontSize = p.getDouble('term_font') ?? 14;
+      _monoFont = p.getInt('term_mono') ?? 0;
+    });
+  }
+
+  Future<void> _saveLook() async {
+    final p = await SharedPreferences.getInstance();
+    await p.setInt('term_theme', _themeIdx);
+    await p.setDouble('term_font', _fontSize);
+    await p.setInt('term_mono', _monoFont);
+  }
+
+  Future<void> _loadApps() async {
+    try {
+      final list = await widget.api.apps();
+      if (mounted && list.isNotEmpty) setState(() => _pcApps = list);
+    } catch (_) {
+      // older server without the list — the built-in buttons stay
+    }
+  }
+
+  /// Opens one more terminal tab (like «+» in Windows Terminal).
+  void _newTerminal() {
+    setState(() {
+      _tabs.add(_Session(++_tabSeq, widget.info.home));
+      _tab = _tabs.length - 1;
+      _ctrl.clear();
+    });
+  }
+
+  void _closeTab(int i) {
+    setState(() {
+      _tabs.removeAt(i).scroll.dispose();
+      if (_tabs.isEmpty) _tabs.add(_Session(++_tabSeq, widget.info.home));
+      if (_tab >= i && _tab > 0) _tab--;
+      _tab = _tab.clamp(0, _tabs.length - 1);
+    });
+  }
+
+  /// Tab strip like Windows Terminal: tabs with ✕, then «+».
+  Widget _tabStrip() {
+    final strip = Color.lerp(_termBg, _termFg, 0.10)!;
+    return Container(
+      height: 42,
+      color: strip,
+      child: Row(children: [
+        Expanded(
+          child: ListView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.only(left: 6, top: 6),
+            children: [
+              for (var i = 0; i < _tabs.length; i++)
+                GestureDetector(
+                  onTap: () => setState(() => _tab = i),
+                  child: Container(
+                    width: 170,
+                    margin: const EdgeInsets.only(right: 2),
+                    padding: const EdgeInsets.only(left: 12, right: 2),
+                    decoration: BoxDecoration(
+                      color: i == _tab ? _termBg : Colors.transparent,
+                      borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
+                    ),
+                    child: Row(children: [
+                      Icon(Icons.terminal_rounded, size: 15, color: _termFg.withValues(alpha: i == _tab ? 1 : 0.6)),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Windows PowerShell',
+                          overflow: TextOverflow.ellipsis,
+                          style: K.t(12.5,
+                              color: _termFg.withValues(alpha: i == _tab ? 1 : 0.6),
+                              w: i == _tab ? FontWeight.w600 : FontWeight.w500),
+                        ),
+                      ),
+                      if (_tabs[i].busy)
+                        Padding(
+                          padding: const EdgeInsets.only(right: 4),
+                          child: SizedBox(
+                              width: 10, height: 10, child: CircularProgressIndicator(strokeWidth: 1.4, color: _termFg)),
+                        ),
+                      InkWell(
+                        borderRadius: BorderRadius.circular(6),
+                        onTap: () => _closeTab(i),
+                        child: Padding(
+                          padding: const EdgeInsets.all(6),
+                          child: Icon(Icons.close_rounded, size: 15, color: _termFg.withValues(alpha: 0.75)),
+                        ),
+                      ),
+                    ]),
+                  ),
+                ),
+              Tooltip(
+                message: 'Новый терминал',
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(6),
+                  onTap: _newTerminal,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    child: Icon(Icons.add_rounded, size: 20, color: _termFg),
+                  ),
                 ),
               ),
-            ),
-          const SizedBox(height: 16),
-          KPillButton('Подробная инструкция', onPressed: _showGuide, bg: K.lilac),
-        ],
-      );
-
-  Widget _logView() => _log.isEmpty
-      ? _welcome()
-      : SelectionArea(
-          child: ListView.builder(
-            controller: _scroll,
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-            itemCount: _log.length,
-            itemBuilder: (_, i) {
-              final e = _log[i];
-              return Padding(
-                padding: const EdgeInsets.only(bottom: 14),
-                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text.rich(TextSpan(children: [
-                    TextSpan(text: 'PS ${e.cwd}> ', style: _mono.copyWith(color: _green)),
-                    TextSpan(text: e.cmd, style: _mono.copyWith(color: K.white, fontWeight: FontWeight.w700)),
-                  ])),
-                  if (e.output == null)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 6),
-                      child: Row(children: [
-                        const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)),
-                        if (e.cmd.toLowerCase().startsWith('спроси'))
-                          Padding(
-                            padding: const EdgeInsets.only(left: 8),
-                            child: Text('Claude думает… это может занять пару минут', style: K.t(12, color: K.muted)),
-                          ),
-                      ]),
-                    )
-                  else if (e.output!.isNotEmpty)
-                    Text(e.output!, style: _mono.copyWith(color: e.error ? K.coral : const Color(0xFFCFCFDA))),
-                ]),
-              );
-            },
+            ],
           ),
-        );
+        ),
+      ]),
+    );
+  }
 
-  Widget _inputBar() => Padding(
-        padding: const EdgeInsets.fromLTRB(10, 4, 10, 10),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(8, 0, 8, 6),
-            child: Row(children: [
-              const Icon(Icons.folder_rounded, size: 13, color: _green),
-              const SizedBox(width: 5),
-              Expanded(
-                child: Text(_cwd, style: _mono.copyWith(fontSize: 11, color: _green), overflow: TextOverflow.ellipsis),
+  void _showTermSettings() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setSheet) {
+        void apply(VoidCallback f) {
+          setState(f);
+          setSheet(() {});
+          _saveLook();
+        }
+
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Center(
+                child: Container(
+                    width: 44, height: 5, decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(3))),
               ),
+              const SizedBox(height: 16),
+              Text('Настройки терминала', style: K.t(20, w: FontWeight.w700)),
+              const SizedBox(height: 16),
+              // preview
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                    color: _termBg, borderRadius: BorderRadius.circular(10), border: Border.all(color: _boxLine)),
+                child: Text('PS C:\\Users> help\nКОМАНДЫ …', style: _ps),
+              ),
+              const SizedBox(height: 18),
+              Text('Цветовая схема', style: K.t(13, color: K.muted, w: FontWeight.w600)),
+              const SizedBox(height: 8),
+              Wrap(spacing: 8, runSpacing: 8, children: [
+                for (var i = 0; i < _termThemes.length; i++)
+                  InkWell(
+                    borderRadius: BorderRadius.circular(10),
+                    onTap: () => apply(() => _themeIdx = i),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                      decoration: BoxDecoration(
+                        color: _termThemes[i].bg,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: i == _themeIdx ? K.lime : Colors.white24, width: i == _themeIdx ? 2 : 1),
+                      ),
+                      child: Text(_termThemes[i].name,
+                          style: K.code(12.5, color: _termThemes[i].fg, w: FontWeight.w700)),
+                    ),
+                  ),
+              ]),
+              const SizedBox(height: 18),
+              Text('Размер шрифта: ${_fontSize.round()}', style: K.t(13, color: K.muted, w: FontWeight.w600)),
+              Slider(
+                value: _fontSize,
+                min: 10,
+                max: 22,
+                divisions: 12,
+                activeColor: K.lime,
+                onChanged: (v) => apply(() => _fontSize = v),
+              ),
+              Text('Шрифт', style: K.t(13, color: K.muted, w: FontWeight.w600)),
+              const SizedBox(height: 8),
+              Wrap(spacing: 8, children: [
+                for (final (i, name) in const [(0, 'JetBrains Mono'), (1, 'Consolas')])
+                  ChoiceChip(
+                    label: Text(name),
+                    selected: _monoFont == i,
+                    onSelected: (_) => apply(() => _monoFont = i),
+                  ),
+              ]),
             ]),
           ),
-          if (_focus.hasFocus) Padding(padding: const EdgeInsets.only(bottom: 6), child: _cmdCarousel()),
-          if (_hint.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(8, 0, 8, 6),
-              child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                const Icon(Icons.lightbulb_rounded, size: 14, color: K.yellow),
-                const SizedBox(width: 5),
-                Expanded(child: Text(_hint, style: K.t(12, color: K.yellow, height: 1.3))),
+        );
+      }),
+    );
+  }
+
+  Widget _logViewCached() {
+    final k = Object.hash(_s.id, _log.length, _log.where((e) => e.output != null).length, _themeIdx, _fontSize,
+        _monoFont);
+    if (k != _logKey || _logCache == null) {
+      _logKey = k;
+      _logCache = _logView();
+    }
+    return _logCache!;
+  }
+
+  Widget _appsRowCached() {
+    final k = identityHashCode(_pcApps);
+    if (k != _appsKey || _appsCache == null) {
+      _appsKey = k;
+      _appsCache = RepaintBoundary(child: _appsRow());
+    }
+    return _appsCache!;
+  }
+
+  Widget _cmdsCached() {
+    final k = Object.hash(_history.length, _history.isEmpty ? '' : _history.last, _themeIdx);
+    if (k != _cmdsKey || _cmdsCache == null) {
+      _cmdsKey = k;
+      _cmdsCache = RepaintBoundary(child: _cmdCarousel());
+    }
+    return _cmdsCache!;
+  }
+
+  Widget _logView() => SelectionArea(
+        key: ValueKey(_s.id),
+        child: ListView.builder(
+          controller: _scroll,
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+          itemCount: _log.length + 1,
+          itemBuilder: (_, i) {
+            if (i == 0) {
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 20),
+                child: Text(
+                    'Windows PowerShell 5.1\n(C) Корпорация Майкрософт (Microsoft Corporation). Все права защищены.',
+                    style: _ps),
+              );
+            }
+            final e = _log[i - 1];
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 14),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text('PS ${e.cwd}> ${e.cmd}', style: _ps),
+                if (e.output == null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Row(children: [
+                      SizedBox(
+                          width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 1.6, color: _termFg)),
+                      if (e.cmd.toLowerCase().startsWith('ask'))
+                        Padding(
+                          padding: const EdgeInsets.only(left: 8),
+                          child: Text('Claude думает… это может занять пару минут',
+                              style: _ps.copyWith(color: _termFg.withValues(alpha: 0.55))),
+                        ),
+                    ]),
+                  )
+                else if (e.output!.isNotEmpty)
+                  Text(e.output!, style: _ps.copyWith(color: e.error ? _termErr : _termFg)),
               ]),
-            ),
+            );
+          },
+        ),
+      );
+
+  IconData _appIcon(String name) {
+    final n = name.toLowerCase();
+    for (final (icon, label, _) in _apps) {
+      if (label.toLowerCase() == n) return icon;
+    }
+    return Icons.apps_rounded;
+  }
+
+  Widget _appsRow() {
+    final list = _pcApps ?? [for (final (_, label, cmd) in _apps) (label, cmd, true)];
+    // only the buttons on screen are built (there can be 100+ programs)
+    return SizedBox(
+      height: 40,
+      child: ListView.builder(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 10),
+        itemCount: list.length + 2,
+        itemBuilder: (_, i) {
+          final Widget chip;
+          if (i == 0) {
+            chip = KChip('Новый терминал', icon: Icons.add_rounded, bg: K.lime, fg: K.ink, onTap: _newTerminal);
+          } else if (i == 1) {
+            chip = KChip('Настройки терминала',
+                icon: Icons.tune_rounded, bg: K.panel2, fg: K.white, onTap: _showTermSettings);
+          } else {
+            final (name, cmd, _) = list[i - 2];
+            final c = _chipColors[(i - 2) % _chipColors.length];
+            chip = KChip(name, icon: _appIcon(name), bg: c.$1, fg: c.$2, onTap: () => _run(cmd));
+          }
+          return Padding(padding: const EdgeInsets.only(right: 7, bottom: 4), child: chip);
+        },
+      ),
+    );
+  }
+
+  Widget _inputBar(bool keyboard) => Container(
+        decoration: BoxDecoration(color: _termBg, border: Border(top: BorderSide(color: _boxLine))),
+        padding: const EdgeInsets.fromLTRB(0, 8, 0, 6),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          // program buttons right above the input
+          if (!keyboard) Padding(padding: const EdgeInsets.only(bottom: 6), child: _appsRowCached()),
+          // possible commands — always shown
+          Padding(padding: const EdgeInsets.fromLTRB(10, 0, 10, 6), child: _cmdsCached()),
+          ValueListenableBuilder<String>(
+            valueListenable: _hint,
+            builder: (_, hint, _) => hint.isEmpty
+                ? const SizedBox.shrink()
+                : Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+                    child: Text(hint, style: K.t(12, color: _termFg.withValues(alpha: 0.6), height: 1.3)),
+                  ),
+          ),
           Container(
-            padding: const EdgeInsets.fromLTRB(18, 4, 5, 4),
-            decoration: BoxDecoration(color: K.panel2, borderRadius: BorderRadius.circular(30)),
+            key: _inputKey,
+            margin: const EdgeInsets.symmetric(horizontal: 10),
+            padding: const EdgeInsets.fromLTRB(12, 2, 2, 2),
+            decoration: BoxDecoration(
+              color: _boxBg,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: _boxLine),
+            ),
             child: Row(children: [
+              Flexible(
+                flex: 0,
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.45),
+                  child: Text('PS $_cwd>', style: _ps, overflow: TextOverflow.ellipsis),
+                ),
+              ),
+              const SizedBox(width: 8),
               Expanded(
                 child: CallbackShortcuts(
                   bindings: {
@@ -511,7 +788,8 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
                   child: TextField(
                     controller: _ctrl,
                     focusNode: _focus,
-                    style: _mono.copyWith(fontSize: 14),
+                    style: _ps,
+                    cursorColor: _termFg,
                     autocorrect: false,
                     enableSuggestions: false,
                     textInputAction: TextInputAction.send,
@@ -519,22 +797,17 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
                       _run(t);
                       _focus.requestFocus();
                     },
-                    decoration: InputDecoration(
-                      hintText: 'Команда… например: помощь',
-                      hintStyle: K.t(14, color: const Color(0xFF6A6A78)),
-                      border: InputBorder.none,
-                      isDense: true,
-                    ),
+                    decoration: const InputDecoration(border: InputBorder.none, isDense: true),
                   ),
                 ),
               ),
-              KRound(
-                _busy ? Icons.hourglass_top_rounded : Icons.arrow_upward_rounded,
-                tip: 'Выполнить',
-                size: 44,
-                bg: K.yellow,
-                fg: K.ink,
-                onTap: _busy ? null : () => _run(_ctrl.text),
+              IconButton(
+                tooltip: 'Выполнить',
+                icon: _busy
+                    ? SizedBox(
+                        width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 1.6, color: _termFg))
+                    : Icon(Icons.keyboard_return_rounded, size: 20, color: _termFg),
+                onPressed: _busy ? null : () => _run(_ctrl.text),
               ),
             ]),
           ),
@@ -544,70 +817,15 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
   @override
   Widget build(BuildContext context) {
     super.build(context);
-    final mq = MediaQuery.of(context);
-    final keyboard = mq.viewInsets.bottom > 0;
-    final landscape = mq.size.width > mq.size.height;
-    return KrakenBackground(
-      scene: KrakenScene.calm,
-      animate: false,
+    final keyboard = MediaQuery.of(context).viewInsets.bottom > 0;
+    return Container(
+      color: _termBg,
       child: SafeArea(
         bottom: false,
         child: Column(children: [
-          if (!(keyboard && landscape))
-            Padding(
-              padding: const EdgeInsets.fromLTRB(18, 12, 18, 10),
-              child: Row(children: [
-                const AppIcon(size: 48),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Text('Терминал', style: K.h(26)),
-                    const SizedBox(height: 3),
-                    Text(widget.info.name, style: K.accent(14), overflow: TextOverflow.ellipsis),
-                  ]),
-                ),
-                const KTag('ONLINE'),
-              ]),
-            ),
-          if (!keyboard)
-            SizedBox(
-              height: 44,
-              child: ListView(
-                scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.symmetric(horizontal: 14),
-                children: [
-                  for (var i = 0; i < _apps.length; i++)
-                    Padding(
-                      padding: const EdgeInsets.only(right: 7, bottom: 4),
-                      child: KChip(
-                        _apps[i].$2,
-                        icon: _apps[i].$1,
-                        bg: _chipColors[i % _chipColors.length].$1,
-                        fg: _chipColors[i % _chipColors.length].$2,
-                        onTap: () => _run(_apps[i].$3),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          const SizedBox(height: 8),
-          Expanded(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 10),
-              child: Container(
-                clipBehavior: Clip.antiAlias,
-                decoration: BoxDecoration(
-                  color: K.ink,
-                  borderRadius: BorderRadius.circular(32),
-                  boxShadow: const [BoxShadow(color: Color(0x55180F70), blurRadius: 30, offset: Offset(0, 12))],
-                ),
-                child: Column(children: [
-                  Expanded(child: _logView()),
-                  _inputBar(),
-                ]),
-              ),
-            ),
-          ),
+          _tabStrip(),
+          Expanded(child: RepaintBoundary(child: _logViewCached())),
+          _inputBar(keyboard),
           if (!keyboard)
             KrakenDock(
               tabs: homeTabs,
@@ -630,3 +848,18 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
     );
   }
 }
+
+class _TermTheme {
+  final String name;
+  final Color bg, fg, err;
+  const _TermTheme(this.name, this.bg, this.fg, this.err);
+}
+
+const _termThemes = [
+  _TermTheme('Campbell', Color(0xFF0C0C0C), Color(0xFFCCCCCC), Color(0xFFF14C4C)),
+  _TermTheme('PowerShell', Color(0xFF012456), Color(0xFFEEEDF0), Color(0xFFF14C4C)),
+  _TermTheme('One Half Dark', Color(0xFF282C34), Color(0xFFDCDFE4), Color(0xFFE06C75)),
+  _TermTheme('Matrix', Color(0xFF000000), Color(0xFF3CF06E), Color(0xFFFF5555)),
+  _TermTheme('Solarized', Color(0xFF002B36), Color(0xFF93A1A1), Color(0xFFDC322F)),
+  _TermTheme('Light', Color(0xFFF2F2F2), Color(0xFF1E1E1E), Color(0xFFC50F1F)),
+];

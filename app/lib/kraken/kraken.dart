@@ -176,209 +176,27 @@ class AppIcon extends StatelessWidget {
       width: size, height: size, filterQuality: FilterQuality.medium);
 }
 
-// ------------------------------------------------------------------ 3D tentacles
-/// A tentacle: a spline through control points (fractions of the box), a root
-/// width (fraction of the shorter side) and a curl at the tip.
-class _Tentacle {
-  final List<Offset> pts;
-  final double width;
-  final double curl; // turns of the tip spiral, sign = direction
-  final double phase;
-  const _Tentacle(this.pts, this.width, this.curl, this.phase);
-}
-
+// ------------------------------------------------------------------ background
 enum KrakenScene { hero, calm }
 
-const _hero = [
-  _Tentacle([Offset(1.2, -0.02), Offset(0.90, 0.06), Offset(0.74, 0.20), Offset(0.86, 0.30)], 0.15, 1.1, 0.0),
-  _Tentacle([Offset(-0.25, 0.12), Offset(0.06, 0.07), Offset(0.30, 0.01), Offset(0.44, 0.07)], 0.12, 1.1, 1.3),
-  _Tentacle([Offset(-0.2, 0.98), Offset(0.08, 0.84), Offset(0.02, 0.66), Offset(0.12, 0.60)], 0.12, 1.05, 2.1),
-  _Tentacle([Offset(1.2, 0.86), Offset(0.92, 0.94), Offset(0.84, 0.76), Offset(0.96, 0.68)], 0.13, -1.05, 3.4),
-];
-
-const _calm = [
-  _Tentacle([Offset(1.2, -0.05), Offset(0.92, 0.06), Offset(0.84, 0.18), Offset(0.96, 0.22)], 0.12, 1.05, 0.0),
-  _Tentacle([Offset(-0.2, 0.92), Offset(0.06, 0.84), Offset(0.04, 0.70), Offset(0.16, 0.70)], 0.10, -1.0, 1.7),
-];
-
-/// Violet backdrop with glossy white 3D tentacles, slowly swaying.
-class KrakenBackground extends StatefulWidget {
+/// Plain black-and-white gradient background.
+class KrakenBackground extends StatelessWidget {
   final KrakenScene scene;
   final bool animate;
   final Widget? child;
-  const KrakenBackground({super.key, this.scene = KrakenScene.hero, this.animate = true, this.child});
+  const KrakenBackground({super.key, this.scene = KrakenScene.hero, this.animate = false, this.child});
 
   @override
-  State<KrakenBackground> createState() => _KrakenBackgroundState();
-}
-
-class _KrakenBackgroundState extends State<KrakenBackground> with SingleTickerProviderStateMixin {
-  late final AnimationController _c =
-      AnimationController(vsync: this, duration: const Duration(seconds: 14));
-
-  @override
-  void initState() {
-    super.initState();
-    if (widget.animate) _c.repeat();
-  }
-
-  @override
-  void dispose() {
-    _c.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Stack(fit: StackFit.expand, children: [
-      RepaintBoundary(
-        child: CustomPaint(
-          painter: _TentaclePainter(_c, widget.scene == KrakenScene.hero ? _hero : _calm),
+  Widget build(BuildContext context) => DecoratedBox(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Color(0xFFF2F2F5), Color(0xFF0C0C10)],
+          ),
         ),
-      ),
-      if (widget.child != null) widget.child!,
-    ]);
-  }
-}
-
-class _TentaclePainter extends CustomPainter {
-  final Animation<double> t;
-  final List<_Tentacle> tentacles;
-  _TentaclePainter(this.t, this.tentacles) : super(repaint: t);
-
-  static const _light = Offset(-0.55, -0.83); // from the top-left
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final rect = Offset.zero & size;
-    canvas.drawRect(
-      rect,
-      Paint()
-        ..shader = const LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [Color(0xFF8279FA), K.violet, K.violetDeep],
-          stops: [0, 0.5, 1],
-        ).createShader(rect),
-    );
-    // soft glow spots
-    canvas.drawCircle(Offset(size.width * 0.15, size.height * 0.12), size.shortestSide * 0.6,
-        Paint()..shader = RadialGradient(colors: [const Color(0x33FFFFFF), const Color(0x00FFFFFF)])
-            .createShader(Rect.fromCircle(center: Offset(size.width * 0.15, size.height * 0.12), radius: size.shortestSide * 0.6)));
-
-    final time = t.value * 2 * math.pi;
-    for (final tn in tentacles) {
-      _drawTentacle(canvas, size, tn, time);
-    }
-  }
-
-  List<(Offset, double, double)> _center(Size size, _Tentacle tn, double time) {
-    final s = size.shortestSide;
-    // sway control points a little
-    final pts = <Offset>[];
-    for (var i = 0; i < tn.pts.length; i++) {
-      final p = tn.pts[i];
-      final a = 0.018 * i;
-      pts.add(Offset(
-        (p.dx + a * math.sin(time + tn.phase + i)) * size.width,
-        (p.dy + a * math.cos(time * 0.8 + tn.phase + i * 1.3)) * size.height,
-      ));
-    }
-    // Catmull-Rom through the points
-    final out = <(Offset, double, double)>[];
-    const seg = 26;
-    for (var i = 0; i < pts.length - 1; i++) {
-      final p0 = pts[math.max(0, i - 1)], p1 = pts[i], p2 = pts[i + 1], p3 = pts[math.min(pts.length - 1, i + 2)];
-      for (var j = 0; j < seg; j++) {
-        final u = j / seg, u2 = u * u, u3 = u2 * u;
-        out.add((
-          (p1 * 2 + (p2 - p0) * u + (p0 * 2 - p1 * 5 + p2 * 4 - p3) * u2 + (p1 * 3 - p0 - p2 * 3 + p3) * u3) * 0.5,
-          0,
-          0
-        ));
-      }
-    }
-    out.add((pts.last, 0, 0));
-    // spiral curl at the tip, continuing the last direction
-    var dir = (out.last.$1 - out[out.length - 3].$1);
-    var h = math.atan2(dir.dy, dir.dx);
-    var p = out.last.$1;
-    final curlLen = s * tn.width * 3.6;
-    const n = 70;
-    final total = tn.curl * 2 * math.pi;
-    for (var i = 0; i < n; i++) {
-      final step = curlLen / n * (1 - i / n * 0.7);
-      h += total / n * (0.6 + 1.2 * i / n);
-      p = p + Offset(math.cos(h), math.sin(h)) * step;
-      out.add((p, 0, 0));
-    }
-    // headings + taper
-    final r0 = s * tn.width / 2;
-    final res = <(Offset, double, double)>[];
-    for (var i = 0; i < out.length; i++) {
-      final a = out[math.max(0, i - 1)].$1, b = out[math.min(out.length - 1, i + 1)].$1;
-      final u = i / (out.length - 1);
-      final r = r0 * (0.05 + 0.95 * math.pow(1 - u, 1.7));
-      res.add((out[i].$1, math.atan2(b.dy - a.dy, b.dx - a.dx), r));
-    }
-    return res;
-  }
-
-  Path _outline(List<(Offset, double, double)> c, {Offset shift = Offset.zero, double k = 1}) {
-    final left = <Offset>[], right = <Offset>[];
-    for (final (p, h, r) in c) {
-      final n = Offset(-math.sin(h), math.cos(h));
-      final q = p + shift * r;
-      left.add(q + n * r * k);
-      right.add(q - n * r * k);
-    }
-    final path = Path()..addPolygon([...left, ...right.reversed], true);
-    final (tp, _, tr) = c.last;
-    path.addOval(Rect.fromCircle(center: tp + shift * tr, radius: tr * k));
-    return path;
-  }
-
-  void _drawTentacle(Canvas canvas, Size size, _Tentacle tn, double time) {
-    final c = _center(size, tn, time);
-    final s = size.shortestSide;
-    final blur = s * tn.width * 0.08;
-    // drop shadow onto the violet background
-    canvas.drawPath(
-      _outline(c).shift(Offset(s * 0.02, s * 0.035)),
-      Paint()
-        ..color = const Color(0x55241A8C)
-        ..maskFilter = MaskFilter.blur(BlurStyle.normal, blur * 1.6),
-    );
-    // body: shaded side
-    canvas.drawPath(_outline(c), Paint()..color = const Color(0xFFC9C6DE));
-    // lit side
-    canvas.save();
-    canvas.clipPath(_outline(c));
-    canvas.drawPath(
-      _outline(c, shift: _light * 0.28, k: 0.74),
-      Paint()
-        ..color = const Color(0xFFF4F3FA)
-        ..maskFilter = MaskFilter.blur(BlurStyle.normal, blur),
-    );
-    // specular streak
-    canvas.drawPath(
-      _outline(c, shift: _light * 0.55, k: 0.16),
-      Paint()
-        ..color = Colors.white
-        ..maskFilter = MaskFilter.blur(BlurStyle.normal, blur * 0.4),
-    );
-    // bounce light from the violet floor on the dark edge
-    canvas.drawPath(
-      _outline(c, shift: -_light * 0.86, k: 0.16),
-      Paint()
-        ..color = const Color(0x667A70FF)
-        ..maskFilter = MaskFilter.blur(BlurStyle.normal, blur * 0.6),
-    );
-    canvas.restore();
-  }
-
-  @override
-  bool shouldRepaint(_TentaclePainter old) => old.tentacles != tentacles;
+        child: child ?? const SizedBox.expand(),
+      );
 }
 
 // ------------------------------------------------------------------ controls
@@ -479,7 +297,7 @@ class KRound extends StatelessWidget {
   Widget build(BuildContext context) {
     final b = Material(
       color: bg ?? (on ? K.lime : K.panel2),
-      shape: CircleBorder(side: BorderSide(color: on ? Colors.transparent : K.line)),
+      shape: CircleBorder(side: BorderSide(color: on || bg == Colors.transparent ? Colors.transparent : K.line)),
       child: InkWell(
         customBorder: const CircleBorder(),
         onTap: onTap,
@@ -544,7 +362,6 @@ class KrakenDock extends StatelessWidget {
               color: K.ink.withValues(alpha: 0.94),
               borderRadius: BorderRadius.circular(30),
               border: Border.all(color: K.line),
-              boxShadow: const [BoxShadow(color: Color(0x66000000), blurRadius: 30, offset: Offset(0, 10))],
             ),
             padding: const EdgeInsets.all(8),
             child: landscape ? _row() : _column(),
@@ -565,26 +382,36 @@ class KrakenDock extends StatelessWidget {
   Widget _toggle() => onToggle == null || actions.isEmpty
       ? const SizedBox.shrink()
       : KRound(expanded ? Icons.keyboard_arrow_down_rounded : Icons.apps_rounded,
-          tip: expanded ? 'Свернуть кнопки' : 'Все кнопки', onTap: onToggle, size: 44);
+          tip: expanded ? 'Свернуть кнопки' : 'Все кнопки', onTap: onToggle, size: 44, bg: Colors.transparent);
 
+  /// Portrait: a strict 5-column grid, so every button sits exactly above another;
+  /// the last row holds the tabs (left columns) and the collapse button (last column).
   Widget _column() {
-    return Column(mainAxisSize: MainAxisSize.min, children: [
-      if (expanded && actions.isNotEmpty)
-        Padding(
-          padding: const EdgeInsets.fromLTRB(4, 6, 4, 10),
-          child: LayoutBuilder(builder: (context, c) {
-            const cols = 5;
-            final w = c.maxWidth / cols;
-            return Wrap(children: [
-              for (final a in actions) SizedBox(width: w, child: _ActionCell(a, labeled: true)),
-            ]);
-          }),
-        ),
-      Row(children: [
-        Expanded(child: SingleChildScrollView(scrollDirection: Axis.horizontal, child: _tabs())),
-        _toggle(),
-      ]),
-    ]);
+    const cols = 5;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: LayoutBuilder(builder: (context, c) {
+        final w = c.maxWidth / cols;
+        Widget cell(Widget child) => SizedBox(width: w, child: Center(child: child));
+        final bottom = <Widget>[
+          for (var i = 0; i < tabs.length; i++) cell(_TabPill(tabs[i], i == tab, () => onTab(i))),
+        ];
+        while (bottom.length < cols - 1) {
+          bottom.add(SizedBox(width: w));
+        }
+        bottom.add(cell(_toggle()));
+        return Column(mainAxisSize: MainAxisSize.min, children: [
+          if (expanded && actions.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 6, bottom: 8),
+              child: Wrap(children: [
+                for (final a in actions) SizedBox(width: w, child: _ActionCell(a, labeled: true)),
+              ]),
+            ),
+          Row(children: bottom),
+        ]);
+      }),
+    );
   }
 
   Widget _row() {
@@ -626,12 +453,8 @@ class _TabPill extends StatelessWidget {
           borderRadius: BorderRadius.circular(30),
           onTap: onTap,
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            child: Row(mainAxisSize: MainAxisSize.min, children: [
-              Icon(t.icon, size: 20, color: active ? K.ink : K.muted),
-              const SizedBox(width: 8),
-              Text(t.label, style: K.t(14, color: active ? K.ink : K.muted, w: FontWeight.w700)),
-            ]),
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+            child: Tooltip(message: t.label, child: Icon(t.icon, size: 22, color: active ? K.ink : K.muted)),
           ),
         ),
       );
@@ -644,7 +467,9 @@ class _ActionCell extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final btn = KRound(a.icon, onTap: a.onTap, on: a.on, tip: labeled ? null : a.label, size: labeled ? 50 : 46);
+    final btn = KRound(a.icon,
+        onTap: a.onTap, on: a.on, tip: labeled ? null : a.label, size: labeled ? 50 : 46,
+        bg: a.on ? null : Colors.transparent);
     if (!labeled) return btn;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),

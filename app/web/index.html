@@ -7,7 +7,7 @@
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="description" content="RemoteDesk — управление ноутбуком с телефона">
-  <meta name="theme-color" content="#6E64F0">
+  <meta name="theme-color" content="#1C1C1F">
 
   <!-- iOS meta tags & icons -->
   <meta name="mobile-web-app-capable" content="yes">
@@ -20,30 +20,29 @@
   <link rel="manifest" href="manifest.json">
 
   <style>
-    html, body { margin: 0; height: 100%; background: #6E64F0; }
+    html, body { margin: 0; height: 100%; background: #1C1C1F; }
     #rd-splash {
       position: fixed; inset: 0; z-index: 9999;
       display: flex; flex-direction: column; align-items: center; justify-content: center;
-      background: linear-gradient(135deg, #8279FA, #6E64F0 50%, #4B3FD6); color: #F6F6FA;
+      background: #1C1C1F; color: #F6F6FA;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       transition: opacity .35s ease;
     }
     #rd-splash.hide { opacity: 0; pointer-events: none; }
-    #rd-splash img { width: 112px; height: 112px; filter: drop-shadow(0 14px 24px rgba(24,15,112,.45)); }
+    #rd-splash img { width: 112px; height: 112px; filter: drop-shadow(0 14px 24px rgba(0,0,0,.5)); }
     #rd-splash h1 { font-size: 30px; font-weight: 800; letter-spacing: -0.5px; margin: 14px 0 4px; }
-    #rd-splash .sub { font-size: 14px; color: #E2DFFF; font-style: italic; margin-bottom: 32px; }
+    #rd-splash .sub { font-size: 14px; color: #B4B4BC; font-style: italic; margin-bottom: 32px; }
     #rd-bar { width: 220px; height: 4px; border-radius: 2px; background: #0C0C10; overflow: hidden; position: relative; }
     #rd-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: #3CF06E; border-radius: 2px;
                transition: width .4s ease; }
     #rd-fill.indet { width: 35%; animation: rd-slide 1.2s ease-in-out infinite; }
     @keyframes rd-slide { 0% { left: -35%; } 100% { left: 100%; } }
-    #rd-step { margin-top: 14px; font-size: 13px; color: #E2DFFF; min-height: 18px; text-align: center; padding: 0 24px; }
-    #rd-slow { margin-top: 8px; font-size: 12px; color: #C9C4FF; text-align: center; padding: 0 32px; display: none; }
+    #rd-step { margin-top: 14px; font-size: 13px; color: #B4B4BC; min-height: 18px; text-align: center; padding: 0 24px; }
+    #rd-slow { margin-top: 8px; font-size: 12px; color: #8A8A92; text-align: center; padding: 0 32px; display: none; }
   </style>
 </head>
 <body>
   <div id="rd-splash">
-    <img src="icons/Icon-192.png" alt="" width="112" height="112">
     <h1>RemoteDesk</h1>
     <div class="sub">Ваш компьютер — в кармане</div>
     <div id="rd-bar"><div id="rd-fill"></div></div>

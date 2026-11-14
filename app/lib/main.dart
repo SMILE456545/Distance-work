@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -98,7 +100,11 @@ class _ConnectScreenState extends State<ConnectScreen> {
       await p.setString('port', '$port');
       await p.setString('key', key);
       if (!mounted) return;
-      await Navigator.of(context).push(MaterialPageRoute(builder: (_) => HomeScreen(api: api, info: info)));
+      await Navigator.of(context).push(PageRouteBuilder(
+        transitionDuration: Duration.zero,
+        reverseTransitionDuration: Duration.zero,
+        pageBuilder: (_, _, _) => HomeScreen(api: api, info: info),
+      ));
     } on ApiError catch (e) {
       setState(() => _error = e.message);
     } catch (_) {
@@ -111,111 +117,201 @@ class _ConnectScreenState extends State<ConnectScreen> {
 
   bool _showKey = false;
 
-  @override
-  Widget build(BuildContext context) {
-    final wide = MediaQuery.of(context).size.width > 820;
-    final hero = Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-      Text('Remote', style: K.h(wide ? 84 : 58)),
-      Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
-        Text('desk', style: K.accent(wide ? 84 : 58)),
-        const SizedBox(width: 14),
-        const KTag('ONLINE 24/7'),
-      ]),
-      const SizedBox(height: 16),
-      Text('Ваш компьютер —\nв кармане', style: K.t(wide ? 20 : 17, w: FontWeight.w600, height: 1.25)),
-    ]);
-    final card = Container(
-      padding: const EdgeInsets.fromLTRB(20, 22, 20, 20),
-      decoration: BoxDecoration(
-        color: K.ink,
-        borderRadius: BorderRadius.circular(34),
-        boxShadow: const [BoxShadow(color: Color(0x55180F70), blurRadius: 40, offset: Offset(0, 18))],
-      ),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, mainAxisSize: MainAxisSize.min, children: [
-        Row(children: [
-          Expanded(child: Text('Подключение', style: K.h(24))),
-          const AppIcon(size: 48),
+  static const _accent = Colors.white; // black & white page
+  static const _field = Color(0xFF141417);
+
+  Widget _label(String text) => Padding(
+        padding: const EdgeInsets.only(bottom: 7),
+        child: Text.rich(TextSpan(children: [
+          TextSpan(text: text, style: K.t(12, color: const Color(0xFFD6D6DC), w: FontWeight.w500)),
+          TextSpan(text: ' *', style: K.t(12, color: const Color(0xFF8A8A92), w: FontWeight.w500)),
+        ])),
+      );
+
+  InputDecoration _input(String hint, {Widget? suffix}) => InputDecoration(
+        hintText: hint,
+        hintStyle: K.t(13, color: const Color(0xFF5E5E66), w: FontWeight.w400),
+        suffixIcon: suffix,
+        filled: true,
+        fillColor: _field,
+        isDense: true,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+        enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Color(0xFF232328))),
+        focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: _accent, width: 1.4)),
+      );
+
+  Widget _photo({required bool wide}) => ClipRRect(
+        borderRadius: BorderRadius.circular(14),
+        child: Stack(fit: StackFit.expand, children: [
+          Image.asset('assets/images/login.jpg',
+              fit: BoxFit.cover, alignment: const Alignment(0, 0.35), filterQuality: FilterQuality.medium),
+          const DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [Color(0x00000000), Color(0x00000000), Color(0xCC000000)],
+                stops: [0, 0.45, 1],
+              ),
+            ),
+          ),
+          Positioned(
+            left: 20,
+            right: 20,
+            bottom: wide ? 30 : 18,
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Text('Терминал и экран ноутбука прямо с телефона.',
+                  textAlign: TextAlign.center, style: K.t(wide ? 17 : 15, w: FontWeight.w500, height: 1.4)),
+              const SizedBox(height: 12),
+              Text('RemoteDesk — удалённый доступ к вашему ПК.',
+                  textAlign: TextAlign.center, style: K.t(11.5, color: const Color(0xFF9A9AA2), w: FontWeight.w400)),
+            ]),
+          ),
         ]),
-        const SizedBox(height: 6),
-        Text('Адрес и ключ показаны в окне сервера на компьютере',
-            style: K.t(13, color: K.muted, height: 1.3)),
-        const SizedBox(height: 18),
+      );
+
+  Widget _form() => Column(crossAxisAlignment: CrossAxisAlignment.stretch, mainAxisSize: MainAxisSize.min, children: [
+        Text('Подключение к компьютеру', style: K.t(20, w: FontWeight.w500)),
+        const SizedBox(height: 10),
+        Text('Соедините телефон с ноутбуком: введите адрес и ключ, которые показаны в окне сервера на компьютере.',
+            style: K.t(12.5, color: const Color(0xFF8A8A92), w: FontWeight.w400, height: 1.5)),
+        const SizedBox(height: 26),
+        _label('Адрес компьютера'),
         TextField(
           controller: _host,
           keyboardType: TextInputType.url,
-          style: K.t(16, w: FontWeight.w600),
-          decoration: kField('Адрес компьютера', hint: '192.168.x.x  или  100.x.x.x'),
+          style: K.t(14, w: FontWeight.w500),
+          decoration: _input('например, 192.168.0.10 или 100.x.x.x'),
         ),
-        const SizedBox(height: 10),
-        Row(children: [
+        const SizedBox(height: 16),
+        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
           SizedBox(
-            width: 110,
-            child: TextField(
-              controller: _port,
-              keyboardType: TextInputType.number,
-              style: K.t(16, w: FontWeight.w600),
-              decoration: kField('Порт'),
-            ),
+            width: 104,
+            child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              _label('Порт'),
+              TextField(
+                controller: _port,
+                keyboardType: TextInputType.number,
+                style: K.t(14, w: FontWeight.w500),
+                decoration: _input('8765'),
+              ),
+            ]),
           ),
-          const SizedBox(width: 10),
+          const SizedBox(width: 12),
           Expanded(
-            child: TextField(
-              controller: _key,
-              keyboardType: TextInputType.visiblePassword,
-              textCapitalization: TextCapitalization.characters,
-              autocorrect: false,
-              enableSuggestions: false,
-              obscureText: !_showKey,
-              onSubmitted: (_) => _connect(),
-              style: K.code(15, w: FontWeight.w700),
-              decoration: kField('Ключ', hint: 'XXXX-XXXX-…',
-                  suffix: IconButton(
-                    icon: Icon(_showKey ? Icons.visibility_off_rounded : Icons.visibility_rounded,
-                        size: 20, color: K.muted),
-                    onPressed: () => setState(() => _showKey = !_showKey),
-                  )),
-            ),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              _label('Ключ доступа'),
+              TextField(
+                controller: _key,
+                keyboardType: TextInputType.visiblePassword,
+                textCapitalization: TextCapitalization.characters,
+                autocorrect: false,
+                enableSuggestions: false,
+                obscureText: !_showKey,
+                onSubmitted: (_) => _connect(),
+                style: K.code(14, w: FontWeight.w700),
+                decoration: _input('XXXX-XXXX-XXXX-XXXX',
+                    suffix: IconButton(
+                      icon: Icon(_showKey ? Icons.visibility_off_outlined : Icons.visibility_outlined,
+                          size: 18, color: const Color(0xFF6A6A72)),
+                      onPressed: () => setState(() => _showKey = !_showKey),
+                    )),
+              ),
+            ]),
           ),
         ]),
+        const SizedBox(height: 10),
+        Text('Ключ из 16 символов. Дома используйте адрес 192.168.x.x, вне дома — адрес Tailscale 100.x.x.x.',
+            style: K.t(11, color: const Color(0xFF6E6E76), w: FontWeight.w400, height: 1.45)),
         if (_error != null) ...[
           const SizedBox(height: 14),
-          Container(
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(color: K.coral.withValues(alpha: 0.14), borderRadius: BorderRadius.circular(16)),
-            child: Text(_error!, style: K.t(13, color: K.coral, height: 1.35)),
-          ),
+          Text(_error!, style: K.t(12, color: K.coral, w: FontWeight.w500, height: 1.4)),
         ],
+        const SizedBox(height: 26),
+        SizedBox(
+          height: 46,
+          child: FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: _accent,
+              foregroundColor: K.ink,
+              disabledBackgroundColor: _accent.withValues(alpha: 0.5),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+            onPressed: _busy ? null : _connect,
+            child: _busy
+                ? const SizedBox(
+                    width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: K.ink))
+                : Text('Подключиться', style: K.t(14, color: K.ink, w: FontWeight.w600)),
+          ),
+        ),
+        const SizedBox(height: 22),
+        Center(
+          child: Text.rich(TextSpan(children: [
+            TextSpan(text: 'Сервер не запущен? ', style: K.t(12, color: const Color(0xFF8A8A92), w: FontWeight.w400)),
+            TextSpan(text: 'Запустите RemoteDesk на ПК', style: K.t(12, w: FontWeight.w600)),
+          ])),
+        ),
         const SizedBox(height: 18),
-        KPillButton('Подключиться', onPressed: _connect, busy: _busy),
-      ]),
+        Center(
+          child: Text('Подключение идёт напрямую к вашему компьютеру и защищено ключом доступа.',
+              textAlign: TextAlign.center,
+              style: K.t(10.5, color: const Color(0xFF5E5E66), w: FontWeight.w400, height: 1.4)),
+        ),
+      ]);
+
+  @override
+  Widget build(BuildContext context) {
+    final size = MediaQuery.of(context).size;
+    final wide = size.width > 760;
+    final card = Container(
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: Colors.black,
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: wide
+          ? SizedBox(
+              height: 560,
+              child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                Expanded(child: _photo(wide: true)),
+                Expanded(
+                  child: Center(
+                    child: SingleChildScrollView(
+                      padding: const EdgeInsets.symmetric(horizontal: 56, vertical: 24),
+                      child: ConstrainedBox(constraints: const BoxConstraints(maxWidth: 360), child: _form()),
+                    ),
+                  ),
+                ),
+              ]),
+            )
+          : Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              SizedBox(height: math.max(220, size.height * 0.34), child: _photo(wide: false)),
+              Padding(padding: const EdgeInsets.fromLTRB(16, 26, 16, 18), child: _form()),
+            ]),
     );
     return Scaffold(
-      backgroundColor: K.violet,
+      backgroundColor: Colors.black,
       body: KrakenBackground(
-        child: SafeArea(
+        child: Stack(children: [
+          // prepares the terminal fonts in advance, so opening the terminal after «Подключиться» doesn't stutter
+          Offstage(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Text(r'PS C:\> Windows PowerShell абв', style: K.code(14)),
+              Text(r'PS C:\> Windows PowerShell абв', style: K.code(14, w: FontWeight.w700)),
+              Text('Терминал Opera', style: K.t(13, w: FontWeight.w600)),
+            ]),
+          ),
+          SafeArea(
           child: Center(
             child: SingleChildScrollView(
-              padding: const EdgeInsets.all(22),
-              child: wide
-                  ? ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 1000),
-                      child: Row(children: [
-                        Expanded(child: hero),
-                        const SizedBox(width: 40),
-                        SizedBox(width: 420, child: card),
-                      ]),
-                    )
-                  : ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 440),
-                      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-                        hero,
-                        const SizedBox(height: 28),
-                        card,
-                      ]),
-                    ),
+              padding: EdgeInsets.all(wide ? 32 : 10),
+              child: ConstrainedBox(constraints: BoxConstraints(maxWidth: wide ? 1000 : 480), child: card),
             ),
           ),
         ),
+        ]),
       ),
     );
   }
@@ -233,19 +329,27 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   int _tab = 0;
 
-  void _setTab(int i) => setState(() => _tab = i);
+  bool _screenOpened = false; // the Screen tab is built the first time it is opened
+
+  void _setTab(int i) => setState(() {
+        _tab = i;
+        if (i == 1) _screenOpened = true;
+      });
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: K.violet,
+      // what shows behind the phone keyboard — dark like the terminal, not violet
+      backgroundColor: const Color(0xFF0C0C0C),
       resizeToAvoidBottomInset: true,
       body: IndexedStack(
         index: _tab,
         children: [
           TerminalScreen(api: widget.api, info: widget.info, tab: _tab, onTab: _setTab),
           // the screen picture is only downloaded while this tab is open
-          RemoteScreen(api: widget.api, info: widget.info, active: _tab == 1, tab: _tab, onTab: _setTab),
+          _screenOpened
+              ? RemoteScreen(api: widget.api, info: widget.info, active: _tab == 1, tab: _tab, onTab: _setTab)
+              : const SizedBox.shrink(),
         ],
       ),
     );

@@ -23,6 +23,10 @@ try:
     import dxcam
 except Exception:  # not installed / no DirectX — slower GDI capture is used
     dxcam = None
+try:  # PC sound -> phone; without it everything else still works, just silently
+    import pyaudiowpatch as pyaudio
+except Exception:
+    pyaudio = None
 from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
 from aiortc.codecs import h264
 from aiortc.mediastreams import MediaStreamError, MediaStreamTrack
@@ -201,6 +205,88 @@ class ScreenTrack(MediaStreamTrack):
 
 
 # ---------------------------------------------------------------- sessions
+class SoundTrack(MediaStreamTrack):
+    """What the PC is playing (WASAPI loopback of the default speakers), as an audio track.
+    Sends silence while sound is off / the Screen tab is closed / nothing plays."""
+    kind = "audio"
+    PTIME = 0.02  # 20 ms packets
+
+    def __init__(self, hub):
+        super().__init__()
+        self.hub = hub
+        self.rate, self.channels = 48000, 2
+        self.chunks = asyncio.Queue(maxsize=50)
+        self.loop = asyncio.get_event_loop()
+        self.running = True
+        self.start = None
+        self.sent = 0
+        threading.Thread(target=self._capture, daemon=True, name="sound").start()
+
+    def _push(self, pcm):
+        if self.chunks.full():
+            try:
+                self.chunks.get_nowait()  # keep the delay small: drop the oldest
+            except asyncio.QueueEmpty:
+                pass
+        self.chunks.put_nowait(pcm)
+
+    def _capture(self):
+        if pyaudio is None:
+            return
+        pa = stream = None
+        try:
+            pa = pyaudio.PyAudio()
+            dev = pa.get_default_wasapi_loopback()
+            ch = max(1, int(dev["maxInputChannels"]))
+            self.rate = int(dev["defaultSampleRate"])
+            n = int(self.rate * self.PTIME)
+            stream = pa.open(format=pyaudio.paInt16, channels=ch, rate=self.rate, input=True,
+                             input_device_index=dev["index"], frames_per_buffer=n)
+            while self.running:
+                data = stream.read(n, exception_on_overflow=False)
+                pcm = np.frombuffer(data, np.int16).reshape(-1, ch)
+                pcm = np.repeat(pcm, 2, axis=1) if ch == 1 else pcm[:, :2]  # always stereo
+                if self.hub.sound and not self.hub.paused:
+                    self.loop.call_soon_threadsafe(self._push, np.ascontiguousarray(pcm))
+        except Exception:
+            pass
+        finally:
+            try:
+                if stream is not None:
+                    stream.close()
+                if pa is not None:
+                    pa.terminate()
+            except Exception:
+                pass
+
+    async def recv(self):
+        if self.readyState != "live":
+            raise MediaStreamError
+        n = int(self.rate * self.PTIME)
+        now = time.time()
+        if self.start is None:
+            self.start = now
+        due = self.start + self.sent / self.rate
+        if due > now:
+            await asyncio.sleep(due - now)
+        elif now - due > 0.5:  # fell behind (e.g. after a pause) — restart the clock
+            self.start, self.sent = now - self.sent / self.rate, self.sent
+        try:
+            pcm = self.chunks.get_nowait()
+        except asyncio.QueueEmpty:
+            pcm = np.zeros((n, 2), np.int16)  # silence
+        frame = av.AudioFrame.from_ndarray(pcm.reshape(1, -1), format="s16", layout="stereo")
+        frame.sample_rate = self.rate
+        frame.pts = self.sent
+        frame.time_base = fractions.Fraction(1, self.rate)
+        self.sent += pcm.shape[0]
+        return frame
+
+    def stop(self):
+        super().stop()
+        self.running = False
+
+
 def prefer_h264(sdp):
     """Moves H.264 to the front of the phone's codec list: phones decode it in
     hardware (less battery, smoother). VP8 stays as a fallback."""
@@ -248,6 +334,7 @@ class RtcHub:
         self.input_pool = ThreadPoolExecutor(1, thread_name_prefix="input")
         self.monitor, self.width, self.fps = 0, 1366, 30
         self.paused = False
+        self.sound = True  # the phone can mute PC sound (and save traffic)
         self.resumed = None
         threading.Thread(target=self._run, daemon=True, name="rtc").start()
 
@@ -287,6 +374,8 @@ class RtcHub:
                 self._set_paused(True)
             elif t == "resume":
                 self._set_paused(False)
+            elif t == "sound":
+                self.sound = bool(ev.get("on", True))
             elif t != "ping":
                 self.input_pool.submit(self._safe_input, ev)
 
@@ -323,6 +412,9 @@ class RtcHub:
             if tr.kind == "video" and getattr(tr, "_codecs", None):
                 tr._codecs.sort(key=_codec_rank)  # aiortc keeps the phone's order otherwise
         pc.addTrack(ScreenTrack(self))
+        if any(tr.kind == "audio" for tr in pc.getTransceivers()):
+            self.sound = bool(offer.get("sound", True))
+            pc.addTrack(SoundTrack(self))
         await pc.setLocalDescription(await pc.createAnswer())
         return {"sdp": self._add_public_candidate(pc.localDescription.sdp), "type": pc.localDescription.type}
 

@@ -11,3 +11,7 @@ app/android/build/
 # Caddy (HTTPS) binary, its config and logs; login log
 server/bin/
 server/access.log
+
+# exe builds (published as GitHub Releases, not in git)
+release/*.exe
+release/build/work/
