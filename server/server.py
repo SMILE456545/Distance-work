@@ -21,8 +21,10 @@ try:
 except Exception:
     ctypes.windll.user32.SetProcessDPIAware()
 
+import struct
+
 import mss
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG = os.path.join(HERE, "config.json")
@@ -159,17 +161,24 @@ def type_text(text):
 
 
 # ---------------------------------------------------------------- screen
+_MSS = getattr(mss, "MSS", None) or mss.mss
 _tls = threading.local()
 
 
 def sct():
     if not hasattr(_tls, "sct"):
-        _tls.sct = mss.mss()
+        _tls.sct = _MSS()
     return _tls.sct
 
 
+_MONITORS = None
+
+
 def monitors():
-    return sct().monitors[1:]  # skip the "all monitors" entry
+    global _MONITORS
+    if _MONITORS is None:
+        _MONITORS = sct().monitors[1:]  # skip the "all monitors" entry
+    return _MONITORS
 
 
 def monitor(idx):
@@ -186,7 +195,7 @@ def to_screen(mon, nx, ny):
 CURSOR = [(0, 0), (0, 17), (4, 13), (7, 20), (10, 19), (7, 12), (12, 12)]
 
 
-def grab(mon_idx, max_w, quality):
+def capture(mon_idx, max_w):
     mon = monitor(mon_idx)
     shot = sct().grab(mon)
     img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
@@ -200,10 +209,126 @@ def grab(mon_idx, max_w, quality):
         d.polygon(poly, fill=(255, 255, 255), outline=(0, 0, 0), width=max(1, int(k)))
     if max_w and img.width > max_w:
         img = img.resize((max_w, int(img.height * max_w / img.width)), Image.BILINEAR)
+    return img
+
+
+def jpeg(img, quality):
     buf = io.BytesIO()
     img.save(buf, "JPEG", quality=quality)
-    data = buf.getvalue()
+    return buf.getvalue()
+
+
+def grab(mon_idx, max_w, quality):
+    data = jpeg(capture(mon_idx, max_w), quality)
     return data, hashlib.md5(data).hexdigest()[:12]
+
+
+def changed_rects(prev, cur, cell=240):
+    """Bounding boxes of what changed, one per grid cell, padded and aligned to 16px."""
+    diff = ImageChops.difference(prev, cur)
+    W, H = cur.size
+    rects = []
+    for y0 in range(0, H, cell):
+        for x0 in range(0, W, cell):
+            x1, y1 = min(W, x0 + cell), min(H, y0 + cell)
+            bb = diff.crop((x0, y0, x1, y1)).getbbox()
+            if not bb:
+                continue
+            l = max(0, (x0 + bb[0] - 2) // 16 * 16)
+            t = max(0, (y0 + bb[1] - 2) // 16 * 16)
+            r = min(W, -(-(x0 + bb[2] + 2) // 16) * 16)
+            b = min(H, -(-(y0 + bb[3] + 2) // 16) * 16)
+            rects.append((l, t, r, b))
+    return rects
+
+
+class Streamer:
+    """Captures the screen continuously in one thread and hands out only the
+    parts that changed since the client's last update."""
+
+    FPS = 25
+    HISTORY = 40
+
+    def __init__(self):
+        self.cond = threading.Condition()
+        self.seq = 0
+        self.updates = []          # [(seq, [(x, y, w, h, jpeg)] or None for full)]
+        self.img = None
+        self.settings = None       # (monitor, width, quality)
+        self.last_req = 0.0
+        self.thread = None
+        self.key = (-1, b"")
+
+    def _touch(self, settings):
+        self.last_req = time.time()
+        if settings != self.settings:
+            self.settings = settings
+            self.img = None
+            self.updates = []
+        if not self.thread or not self.thread.is_alive():
+            self.thread = threading.Thread(target=self._run, daemon=True)
+            self.thread.start()
+
+    def _run(self):
+        period = 1.0 / self.FPS
+        while time.time() - self.last_req < 15:
+            t0 = time.time()
+            settings = self.settings
+            mon_idx, width, quality = settings
+            try:
+                img = capture(mon_idx, width)
+            except Exception:
+                time.sleep(0.5)
+                continue
+            prev = self.img
+            patch = None
+            if prev is not None and prev.size == img.size:
+                rects = changed_rects(prev, img)
+                if not rects:
+                    time.sleep(max(0.0, period - (time.time() - t0)))
+                    continue
+                area = sum((r - l) * (b - t) for l, t, r, b in rects)
+                if area < img.width * img.height * 0.6:
+                    patch = [(l, t, r - l, b - t, jpeg(img.crop((l, t, r, b)), quality))
+                             for l, t, r, b in rects]
+            with self.cond:
+                if settings != self.settings:
+                    continue
+                self.img = img
+                self.seq += 1
+                self.updates.append((self.seq, patch))
+                del self.updates[:-self.HISTORY]
+                self.cond.notify_all()
+            time.sleep(max(0.0, period - (time.time() - t0)))
+
+    def get(self, after, settings, want_key, timeout=2.0):
+        deadline = time.time() + timeout
+        with self.cond:
+            self._touch(settings)
+            while self.img is None or self.seq <= after:
+                left = deadline - time.time()
+                if left <= 0:
+                    return None
+                self.cond.wait(left)
+                self.last_req = time.time()
+            img, seq = self.img, self.seq
+            pending = [u for u in self.updates if u[0] > after]
+            first = self.updates[0][0] if self.updates else seq + 1
+            full = (want_key or after < first - 1 or any(p is None for _, p in pending)
+                    or sum(len(r[4]) for _, p in pending for r in p) > 400_000)
+            if full:
+                if self.key[0] != seq:
+                    self.key = (seq, jpeg(img, settings[2]))
+                rects = [(0, 0, img.width, img.height, self.key[1])]
+            else:
+                rects = [r for _, p in pending for r in p]
+        meta = {"seq": seq, "w": img.width, "h": img.height, "key": full,
+                "rects": [[x, y, w, h, len(d)] for x, y, w, h, d in rects]}
+        head = json.dumps(meta).encode()
+        return struct.pack(">I", len(head)) + head + b"".join(r[4] for r in rects)
+
+
+STREAM = Streamer()
 
 
 # ---------------------------------------------------------------- terminal
@@ -287,6 +412,24 @@ class Handler(BaseHTTPRequestHandler):
                     "monitors": [{"width": m["width"], "height": m["height"]} for m in mons],
                     "home": os.path.expanduser("~"),
                 })
+            if u.path == "/api/stream":
+                settings = (int(q.get("m", ["0"])[0]), int(q.get("w", ["1280"])[0]),
+                            max(10, min(95, int(q.get("q", ["60"])[0]))))
+                body = STREAM.get(int(q.get("after", ["0"])[0]), settings,
+                                  q.get("kf", ["0"])[0] == "1")
+                if body is None:
+                    self.send_response(204)
+                    self._cors()
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self._cors()
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if u.path == "/api/frame":
                 mon = int(q.get("m", ["0"])[0])
                 w = int(q.get("w", ["1280"])[0])

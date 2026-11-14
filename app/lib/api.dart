@@ -30,12 +30,45 @@ class Frame {
   Frame(this.bytes, this.tag);
 }
 
+class Patch {
+  final double x, y, w, h;
+  final Uint8List bytes;
+  Patch(this.x, this.y, this.w, this.h, this.bytes);
+}
+
+/// A screen update: either a full picture ([key]) or only the changed parts.
+class ScreenUpdate {
+  final int seq;
+  final int width;
+  final int height;
+  final bool key;
+  final List<Patch> patches;
+  ScreenUpdate(this.seq, this.width, this.height, this.key, this.patches);
+
+  static ScreenUpdate parse(Uint8List b) {
+    final jl = ByteData.sublistView(b).getUint32(0);
+    final j = jsonDecode(utf8.decode(Uint8List.sublistView(b, 4, 4 + jl))) as Map<String, dynamic>;
+    var off = 4 + jl;
+    final patches = <Patch>[];
+    for (final r in j['rects'] as List) {
+      final len = r[4] as int;
+      patches.add(Patch((r[0] as num).toDouble(), (r[1] as num).toDouble(), (r[2] as num).toDouble(),
+          (r[3] as num).toDouble(), Uint8List.sublistView(b, off, off + len)));
+      off += len;
+    }
+    return ScreenUpdate(j['seq'] as int, j['w'] as int, j['h'] as int, j['key'] as bool, patches);
+  }
+}
+
 /// Talks to the RemoteDesk server running on the computer.
 class Api {
   final String host;
   final int port;
   final String key;
   final http.Client _client = http.Client();
+
+  /// Round-trip time measured when connecting, in milliseconds.
+  int rttMs = 0;
 
   Api(this.host, this.port, this.key);
 
@@ -47,9 +80,11 @@ class Api {
   void close() => _client.close();
 
   Future<ServerInfo> info() async {
+    final sw = Stopwatch()..start();
     final r = await _client
         .get(_u('/api/info'), headers: _headers)
         .timeout(const Duration(seconds: 5));
+    rttMs = sw.elapsedMilliseconds;
     _check(r);
     final j = jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
     final mons = (j['monitors'] as List)
@@ -69,6 +104,27 @@ class Api {
     if (r.statusCode == 204) return null;
     _check(r);
     return Frame(r.bodyBytes, r.headers['x-frame'] ?? '');
+  }
+
+  /// Waits (up to ~2 s on the server) for screen changes newer than [after].
+  /// Returns null when nothing changed.
+  Future<ScreenUpdate?> stream(
+      {required int after, int monitor = 0, int width = 1280, int quality = 60, bool keyframe = false}) async {
+    final r = await _client
+        .get(
+          _u('/api/stream', {
+            'after': '$after',
+            'm': '$monitor',
+            'w': '$width',
+            'q': '$quality',
+            if (keyframe) 'kf': '1',
+          }),
+          headers: {'X-Key': key},
+        )
+        .timeout(const Duration(seconds: 10));
+    if (r.statusCode == 204) return null;
+    _check(r);
+    return ScreenUpdate.parse(r.bodyBytes);
   }
 
   Future<void> input(List<Map<String, dynamic>> events) async {
