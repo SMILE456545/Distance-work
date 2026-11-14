@@ -166,6 +166,16 @@ class KrakenWordmark extends StatelessWidget {
       ]));
 }
 
+/// The product's own icon (each Kraken Digital app has its own; the kraken is the company mark).
+class AppIcon extends StatelessWidget {
+  final double size;
+  const AppIcon({super.key, this.size = 44});
+
+  @override
+  Widget build(BuildContext context) => Image.asset('assets/images/app_icon.png',
+      width: size, height: size, filterQuality: FilterQuality.medium);
+}
+
 // ------------------------------------------------------------------ 3D tentacles
 /// A tentacle: a spline through control points (fractions of the box), a root
 /// width (fraction of the shorter side) and a curl at the tip.

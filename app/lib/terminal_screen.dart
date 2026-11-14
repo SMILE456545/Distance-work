@@ -557,7 +557,7 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
             Padding(
               padding: const EdgeInsets.fromLTRB(18, 12, 18, 10),
               child: Row(children: [
-                const KrakenBadge(size: 44, bg: K.ink, fg: K.white),
+                const AppIcon(size: 48),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [

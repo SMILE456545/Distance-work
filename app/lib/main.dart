@@ -136,7 +136,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
       child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, mainAxisSize: MainAxisSize.min, children: [
         Row(children: [
           Expanded(child: Text('Подключение', style: K.h(24))),
-          const KrakenBadge(size: 40),
+          const AppIcon(size: 48),
         ]),
         const SizedBox(height: 6),
         Text('Адрес и ключ показаны в окне сервера на компьютере',

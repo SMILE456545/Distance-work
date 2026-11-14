@@ -619,7 +619,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
                             : _base == null
                             ? Center(
                                 child: Column(mainAxisSize: MainAxisSize.min, children: [
-                                  const KrakenLogo(size: 64, color: K.lilac),
+                                  const AppIcon(size: 72),
                                   const SizedBox(height: 14),
                                   Text('Подключаю экран…', style: K.t(14, color: K.muted)),
                                 ]),
