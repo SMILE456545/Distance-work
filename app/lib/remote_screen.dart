@@ -17,9 +17,9 @@ class _Quality {
 }
 
 const _qualities = [
-  _Quality('Р­РєРѕРЅРѕРј', 960, 45),
-  _Quality('РќРѕСЂРјР°', 1366, 60),
-  _Quality('Р’С‹СЃРѕРєРѕРµ', 1920, 75),
+  _Quality('Эконом', 960, 45),
+  _Quality('Норма', 1366, 60),
+  _Quality('Высокое', 1920, 75),
 ];
 
 class RemoteScreen extends StatefulWidget {
@@ -83,7 +83,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
   @override
   void initState() {
     super.initState();
-    // far away (via internet / VPN) в†’ start with lighter picture
+    // far away (via internet / VPN) → start with lighter picture
     _quality = widget.api.rttMs > 60 ? 0 : 1;
     _fpsTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted) setState(() => _fps = _framesThisSecond);
@@ -115,7 +115,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
           monitor: _monitor,
           width: q.width,
           quality: q.q,
-          keyframe: _base == null || _patches.length > 120,
+          keyframe: _base == null || _patches.length > 60,
         );
         if (!mounted) return;
         if (u != null) {
@@ -143,6 +143,11 @@ class _RemoteScreenState extends State<RemoteScreen> {
       _imgW = u.width;
       _imgH = u.height;
       if (u.key) {
+        // free decoded pictures that are no longer shown (iPhone has little memory for them)
+        _base?.evict();
+        for (final (_, img) in _patches) {
+          img.evict();
+        }
         _base = imgs.first.$2;
         _patches.clear();
       } else {
@@ -442,8 +447,8 @@ class _RemoteScreenState extends State<RemoteScreen> {
             left: 8,
             top: 8,
             child: _badge(_offline
-                ? 'РќРµС‚ СЃРІСЏР·РёвЂ¦'
-                : '${widget.info.name} В· $_fps Рє/СЃ${_scale > 1 ? ' В· Г—${_scale.toStringAsFixed(1)}' : ''}',
+                ? 'Нет связи…'
+                : '${widget.info.name} · $_fps к/с${_scale > 1 ? ' · ×${_scale.toStringAsFixed(1)}' : ''}',
                 _offline ? const Color(0xFFFF7B72) : Colors.white70),
           ),
           // hidden text field that receives the phone keyboard
@@ -501,39 +506,39 @@ class _RemoteScreenState extends State<RemoteScreen> {
       child: SingleChildScrollView(
         scrollDirection: Axis.horizontal,
         child: Row(children: [
-          _toolBtn(Icons.keyboard, 'РљР»Р°РІРёР°С‚СѓСЂР°', _toggleKeyboard, on: _kbFocus.hasFocus),
-          _toolBtn(Icons.keyboard_command_key, 'РЎРїРµС†. РєР»Р°РІРёС€Рё', () => setState(() => _showKeys = !_showKeys),
+          _toolBtn(Icons.keyboard, 'Клавиатура', _toggleKeyboard, on: _kbFocus.hasFocus),
+          _toolBtn(Icons.keyboard_command_key, 'Спец. клавиши', () => setState(() => _showKeys = !_showKeys),
               on: _showKeys),
           _toolBtn(_mode == TouchMode.direct ? Icons.touch_app : Icons.mouse,
-              _mode == TouchMode.direct ? 'Р РµР¶РёРј: РєР°СЃР°РЅРёРµ' : 'Р РµР¶РёРј: С‚Р°С‡РїР°Рґ', () {
+              _mode == TouchMode.direct ? 'Режим: касание' : 'Режим: тачпад', () {
             setState(() => _mode = _mode == TouchMode.direct ? TouchMode.touchpad : TouchMode.direct);
             _snack(_mode == TouchMode.direct
-                ? 'РљР°СЃР°РЅРёРµ: РЅР°Р¶РёРјР°Р№С‚Рµ РїСЂСЏРјРѕ РЅР° РЅСѓР¶РЅРѕРµ РјРµСЃС‚Рѕ'
-                : 'РўР°С‡РїР°Рґ: РІРѕРґРёС‚Рµ РїР°Р»СЊС†РµРј, РєСѓСЂСЃРѕСЂ РґРІРёРіР°РµС‚СЃСЏ РєР°Рє РЅР° РЅРѕСѓС‚Р±СѓРєРµ');
+                ? 'Касание: нажимайте прямо на нужное место'
+                : 'Тачпад: водите пальцем, курсор двигается как на ноутбуке');
           }),
-          _toolBtn(Icons.pan_tool_alt, 'РџРµСЂРµС‚Р°СЃРєРёРІР°РЅРёРµ (Р·Р°Р¶Р°С‚СЊ Р›РљРњ)', () {
+          _toolBtn(Icons.pan_tool_alt, 'Перетаскивание (зажать ЛКМ)', () {
             setState(() => _dragLock = !_dragLock);
-            _snack(_dragLock ? 'РџРµСЂРµС‚Р°СЃРєРёРІР°РЅРёРµ РІРєР»СЋС‡РµРЅРѕ: РІРµРґРёС‚Рµ РїР°Р»СЊС†РµРј, С‡С‚РѕР±С‹ С‚СЏРЅСѓС‚СЊ' : 'РџРµСЂРµС‚Р°СЃРєРёРІР°РЅРёРµ РІС‹РєР»СЋС‡РµРЅРѕ');
+            _snack(_dragLock ? 'Перетаскивание включено: ведите пальцем, чтобы тянуть' : 'Перетаскивание выключено');
           }, on: _dragLock),
-          _toolBtn(Icons.ads_click, 'РџСЂР°РІС‹Р№ РєР»РёРє (РёР»Рё РґРѕР»РіРѕРµ РЅР°Р¶Р°С‚РёРµ)', () => _send({'t': 'click', 'b': 'right'})),
-          _toolBtn(Icons.zoom_out_map, 'РЎР±СЂРѕСЃРёС‚СЊ РјР°СЃС€С‚Р°Р±', () => setState(() {
+          _toolBtn(Icons.ads_click, 'Правый клик (или долгое нажатие)', () => _send({'t': 'click', 'b': 'right'})),
+          _toolBtn(Icons.zoom_out_map, 'Сбросить масштаб', () => setState(() {
                 _scale = 1;
                 _offset = Offset.zero;
               })),
-          _toolBtn(Icons.high_quality, 'РљР°С‡РµСЃС‚РІРѕ: ${_qualities[_quality].label}', () {
+          _toolBtn(Icons.high_quality, 'Качество: ${_qualities[_quality].label}', () {
             setState(() {
               _quality = (_quality + 1) % _qualities.length;
             });
-            _snack('РљР°С‡РµСЃС‚РІРѕ: ${_qualities[_quality].label}');
+            _snack('Качество: ${_qualities[_quality].label}');
           }),
           if (widget.info.monitors.length > 1)
-            _toolBtn(Icons.monitor, 'РњРѕРЅРёС‚РѕСЂ ${_monitor + 1}', () {
+            _toolBtn(Icons.monitor, 'Монитор ${_monitor + 1}', () {
               setState(() {
                 _monitor = (_monitor + 1) % widget.info.monitors.length;
               });
-              _snack('РњРѕРЅРёС‚РѕСЂ ${_monitor + 1}');
+              _snack('Монитор ${_monitor + 1}');
             }),
-          _toolBtn(Icons.logout, 'РћС‚РєР»СЋС‡РёС‚СЊСЃСЏ', () => Navigator.of(context).pop()),
+          _toolBtn(Icons.logout, 'Отключиться', () => Navigator.of(context).pop()),
         ]),
       ),
     );
@@ -583,12 +588,12 @@ class _RemoteScreenState extends State<RemoteScreen> {
           _chip('Esc', () => _key(['esc'])),
           _chip('Tab', () => _key(['tab'])),
           _chip('Enter', () => _key(['enter'])),
-          _chip('вЊ«', () => _key(['backspace'])),
+          _chip('⌫', () => _key(['backspace'])),
           _chip('Del', () => _key(['delete'])),
-          _chip('в†ђ', () => _key(['left'])),
-          _chip('в†‘', () => _key(['up'])),
-          _chip('в†“', () => _key(['down'])),
-          _chip('в†’', () => _key(['right'])),
+          _chip('←', () => _key(['left'])),
+          _chip('↑', () => _key(['up'])),
+          _chip('↓', () => _key(['down'])),
+          _chip('→', () => _key(['right'])),
           _chip('Home', () => _key(['home'])),
           _chip('End', () => _key(['end'])),
           _chip('PgUp', () => _key(['pageup'])),
@@ -596,24 +601,24 @@ class _RemoteScreenState extends State<RemoteScreen> {
           for (var i = 1; i <= 12; i++) _chip('F$i', () => _key(['f$i'])),
         ]),
         _row([
-          _chip('РџСѓСЃРє', () => _key(['win'])),
-          _chip('РљРѕРїРёСЂРѕРІР°С‚СЊ', () => _key(['ctrl', 'c'])),
-          _chip('Р’СЃС‚Р°РІРёС‚СЊ', () => _key(['ctrl', 'v'])),
-          _chip('Р’С‹СЂРµР·Р°С‚СЊ', () => _key(['ctrl', 'x'])),
-          _chip('РћС‚РјРµРЅРёС‚СЊ', () => _key(['ctrl', 'z'])),
-          _chip('Р’С‹РґРµР»РёС‚СЊ РІСЃС‘', () => _key(['ctrl', 'a'])),
-          _chip('РЎРѕС…СЂР°РЅРёС‚СЊ', () => _key(['ctrl', 's'])),
+          _chip('Пуск', () => _key(['win'])),
+          _chip('Копировать', () => _key(['ctrl', 'c'])),
+          _chip('Вставить', () => _key(['ctrl', 'v'])),
+          _chip('Вырезать', () => _key(['ctrl', 'x'])),
+          _chip('Отменить', () => _key(['ctrl', 'z'])),
+          _chip('Выделить всё', () => _key(['ctrl', 'a'])),
+          _chip('Сохранить', () => _key(['ctrl', 's'])),
           _chip('Alt+Tab', () => _key(['alt', 'tab'])),
-          _chip('Р—Р°РєСЂС‹С‚СЊ РѕРєРЅРѕ', () => _key(['alt', 'f4'])),
-          _chip('Р Р°Р±РѕС‡РёР№ СЃС‚РѕР»', () => _key(['win', 'd'])),
-          _chip('РџСЂРѕРІРѕРґРЅРёРє', () => _key(['win', 'e'])),
-          _chip('Р’С‹РїРѕР»РЅРёС‚СЊ', () => _key(['win', 'r'])),
-          _chip('Р”РёСЃРїРµС‚С‡РµСЂ Р·Р°РґР°С‡', () => _key(['ctrl', 'shift', 'esc'])),
-          _chip('РЎРјРµРЅР° СЏР·С‹РєР°', () => _key(['alt', 'shift'])),
-          _chip('рџ”‰', () => _key(['volumedown'])),
-          _chip('рџ”Љ', () => _key(['volumeup'])),
-          _chip('рџ”‡', () => _key(['volumemute'])),
-          _chip('вЏЇ', () => _key(['mediaplay'])),
+          _chip('Закрыть окно', () => _key(['alt', 'f4'])),
+          _chip('Рабочий стол', () => _key(['win', 'd'])),
+          _chip('Проводник', () => _key(['win', 'e'])),
+          _chip('Выполнить', () => _key(['win', 'r'])),
+          _chip('Диспетчер задач', () => _key(['ctrl', 'shift', 'esc'])),
+          _chip('Смена языка', () => _key(['alt', 'shift'])),
+          _chip('🔉', () => _key(['volumedown'])),
+          _chip('🔊', () => _key(['volumeup'])),
+          _chip('🔇', () => _key(['volumemute'])),
+          _chip('⏯', () => _key(['mediaplay'])),
         ]),
       ]),
     );

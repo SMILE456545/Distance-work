@@ -53,7 +53,8 @@ class ScreenUpdate {
     for (final r in j['rects'] as List) {
       final len = r[4] as int;
       patches.add(Patch((r[0] as num).toDouble(), (r[1] as num).toDouble(), (r[2] as num).toDouble(),
-          (r[3] as num).toDouble(), Uint8List.sublistView(b, off, off + len)));
+          // own copy: Safari can't decode images that are views into a bigger buffer
+          (r[3] as num).toDouble(), Uint8List.fromList(Uint8List.sublistView(b, off, off + len))));
       off += len;
     }
     return ScreenUpdate(j['seq'] as int, j['w'] as int, j['h'] as int, j['key'] as bool, patches);
