@@ -545,11 +545,173 @@ def ask_claude(text, cwd):
     return out or err or "[пустой ответ]"
 
 
+# ---------------------------------------------------------------- open windows / closing
+kernel32 = ctypes.windll.kernel32
+dwmapi = ctypes.windll.dwmapi
+kernel32.OpenProcess.restype = wt.HANDLE
+kernel32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+kernel32.CloseHandle.argtypes = [wt.HANDLE]
+kernel32.QueryFullProcessImageNameW.argtypes = [wt.HANDLE, wt.DWORD, wt.LPWSTR, ctypes.POINTER(wt.DWORD)]
+kernel32.GetConsoleWindow.restype = wt.HWND
+user32.GetWindow.restype = wt.HWND
+user32.GetWindow.argtypes = [wt.HWND, wt.UINT]
+user32.PostMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
+user32.IsWindow.argtypes = [wt.HWND]
+WNDENUMPROC = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+
+# which program files belong to each friendly name (for «закрыть …»)
+CLOSE_RULES = {
+    "Opera": {"exe": ["opera.exe"]},
+    "Streak": {"exe": ["streak.exe"]},
+    "VS Code": {"exe": ["code.exe"]},
+    "CMD (консоль)": {"exe": ["cmd.exe", "conhost.exe"]},
+    "PowerShell": {"exe": ["powershell.exe", "pwsh.exe"], "title": ["powershell"]},
+    "Проводник": {"exe": ["explorer.exe"]},
+    "Рабочий стол": {"exe": ["explorer.exe"], "title": ["рабочий стол", "desktop"]},
+    "Загрузки": {"exe": ["explorer.exe"], "title": ["загрузки", "downloads"]},
+    "Документы": {"exe": ["explorer.exe"], "title": ["документы", "documents"]},
+    "Unity Hub": {"exe": ["unity hub.exe"]},
+    "Claude Code": {"title": ["claude"]},
+    "Блокнот": {"exe": ["notepad.exe"]},
+    "Калькулятор": {"title": ["калькулятор", "calculator"]},
+    "Диспетчер задач": {"exe": ["taskmgr.exe"]},
+    "Параметры": {"title": ["параметры", "settings"]},
+}
+NEVER_FORCE = {"explorer.exe", "python.exe", "pythonw.exe", "dwm.exe", "csrss.exe", "winlogon.exe",
+               "tailscale-ipn.exe", "tailscaled.exe"}
+LAST_WINDOWS = []
+
+
+def _exe_of(pid):
+    h = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        size = wt.DWORD(1024)
+        if kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+            return os.path.basename(buf.value)
+        return ""
+    finally:
+        kernel32.CloseHandle(h)
+
+
+def open_windows():
+    """Visible top-level windows the user can see on the taskbar (except the server's own window)."""
+    own = kernel32.GetConsoleWindow()
+    found = []
+
+    def cb(hwnd, _):
+        if not user32.IsWindowVisible(hwnd) or user32.GetWindow(hwnd, 4):  # GW_OWNER
+            return True
+        if user32.GetWindowLongW(hwnd, -20) & 0x80:  # WS_EX_TOOLWINDOW
+            return True
+        n = user32.GetWindowTextLengthW(hwnd)
+        if not n:
+            return True
+        buf = ctypes.create_unicode_buffer(n + 1)
+        user32.GetWindowTextW(hwnd, buf, n + 1)
+        title = buf.value
+        cloaked = wt.DWORD(0)
+        dwmapi.DwmGetWindowAttribute(wt.HWND(hwnd), 14, ctypes.byref(cloaked), 4)  # DWMWA_CLOAKED
+        if cloaked.value or title == "Program Manager" or (own and hwnd == own) or "RemoteDesk" in title:
+            return True
+        pid = wt.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        found.append({"hwnd": hwnd, "pid": pid.value, "exe": _exe_of(pid.value), "title": title})
+        return True
+
+    user32.EnumWindows(WNDENUMPROC(cb), 0)
+    return found
+
+
+def _app_name(w):
+    exe = w["exe"].lower()
+    if exe == "windowsterminal.exe":
+        return "Windows Terminal (все его вкладки)"
+    if exe == "unity.exe":
+        return "Unity"
+    for name, rule in CLOSE_RULES.items():
+        if exe in rule.get("exe", []) and not rule.get("title"):
+            return name
+    return os.path.splitext(w["exe"])[0] or "?"
+
+
+def match_windows(query, wins):
+    q = query.strip().lower()
+    if not q:
+        return []
+    if q.isdigit():
+        i = int(q)
+        if 1 <= i <= len(LAST_WINDOWS):
+            hw = LAST_WINDOWS[i - 1]["hwnd"]
+            return [w for w in wins if w["hwnd"] == hw]
+        return []
+    for title, aliases, _ in BUILTIN_APPS:
+        if q == title.lower() or q in aliases:
+            rule = CLOSE_RULES.get(title, {})
+            exes, words = rule.get("exe"), rule.get("title")
+            return [w for w in wins
+                    if (not exes or w["exe"].lower() in exes)
+                    and (not words or any(k in w["title"].lower() for k in words))]
+    if q in ("unity", "юнити"):
+        return [w for w in wins if w["exe"].lower() == "unity.exe"]
+    return [w for w in wins if q in os.path.splitext(w["exe"])[0].lower() or q in w["title"].lower()]
+
+
+def list_windows():
+    global LAST_WINDOWS
+    LAST_WINDOWS = open_windows()
+    if not LAST_WINDOWS:
+        return "Открытых окон нет."
+    lines = [f"  {i:>2}. {_app_name(w)} — {w['title'][:70]}" for i, w in enumerate(LAST_WINDOWS, 1)]
+    return ("ОТКРЫТЫЕ ОКНА:\n" + "\n".join(lines)
+            + "\n\nЗакрыть:  закрыть 2   ·   закрыть opera   ·   если зависло: закрыть принудительно 2")
+
+
+def close_windows(query, force=False):
+    wins = open_windows()
+    targets = match_windows(query, wins)
+    if not targets:
+        return (f"Не нашёл открытое окно «{query}».\n"
+                "Напишите «открытые», чтобы увидеть список, и закройте по номеру:  закрыть 3")
+    names = sorted({_app_name(w) for w in targets})
+    if force:
+        exes = {w["exe"].lower() for w in targets}
+        bad = exes & NEVER_FORCE
+        if bad:
+            return ("Проводник и служебные программы принудительно не закрываю — пропадёт панель задач "
+                    "или связь с ноутбуком.\nЗакройте обычно:  закрыть " + query)
+        out = []
+        for pid in sorted({w["pid"] for w in targets}):
+            p = subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True,
+                               creationflags=subprocess.CREATE_NO_WINDOW)
+            out.append(pid if p.returncode == 0 else None)
+        ok = [p for p in out if p]
+        return (f"Принудительно закрыл: {', '.join(names)}  ({len(ok)} из {len(out)} процессов)"
+                + ("" if len(ok) == len(out) else "\nЧасть не закрылась — возможно, нужны права администратора."))
+    for w in targets:
+        user32.PostMessageW(w["hwnd"], 0x0010, 0, 0)  # WM_CLOSE — like pressing ✕
+    time.sleep(1.5)
+    still = [w for w in targets if user32.IsWindow(w["hwnd"]) and user32.IsWindowVisible(w["hwnd"])]
+    msg = f"Закрываю: {', '.join(names)}  (окон: {len(targets)})"
+    if still:
+        msg += (f"\n{len(still)} окно(а) ещё открыто — программа, наверное, спрашивает «Сохранить?».\n"
+                "Ответьте во вкладке «Экран» или закройте без сохранения:  закрыть принудительно " + query)
+    else:
+        msg += "\nГотово, закрыто."
+    return msg
+
+
 HELP = """КОМАНДЫ (можно писать по-русски)
 
   программы            — список программ, которые можно открыть
   открыть <программа>  — открыть программу:  открыть opera,  открыть streak
   <программа>          — то же самое коротко:  opera,  vscode,  cmd,  unity hub
+
+  открытые             — какие окна сейчас открыты (с номерами)
+  закрыть <программа>  — закрыть, как крестиком:  закрыть opera,  закрыть 3
+  закрыть принудительно <программа> — если программа зависла (без сохранения!)
 
   проекты              — список папок и проектов с номерами
   перейти <номер>      — зайти в папку проекта (тут будут выполняться команды)
@@ -604,6 +766,17 @@ def friendly(cmd, cwd):
             return res(str(e))
         lines = [("📁 " if os.path.isdir(os.path.join(cwd, n)) else "   ") + n for n in entries[:200]]
         return res(f"{cwd}\n" + ("\n".join(lines) or "(пусто)"))
+    if low in ("открытые", "окна", "запущено", "что открыто", "открытые окна", "windows"):
+        return res(list_windows())
+    if w in ("закрыть", "закрой", "close", "убить", "kill"):
+        force = w in ("убить", "kill")
+        q = rest
+        for word in ("принудительно", "насильно", "force"):
+            if q.lower().startswith(word):
+                force, q = True, q[len(word):].strip()
+        if not q:
+            return res("Что закрыть? Например:  закрыть opera   ·   «открытые» — список окон с номерами")
+        return res(close_windows(q, force))
     if low == "новый чат":
         CLAUDE_CHATS.discard(cwd.lower())
         return res("Следующий вопрос «спроси …» начнёт новый разговор с Claude.")
