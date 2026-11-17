@@ -28,64 +28,6 @@ class _Entry {
 }
 
 const _claudeColor = Color(0xFFD97757); // Claude's orange
-const _green = K.lime;
-const _blue = K.lilac;
-
-/// Colors of the quick-launch chips, in turn (like the colorful tags in the references).
-const _chipColors = [
-  (K.white, K.ink),
-  (K.lilac, K.ink),
-  (K.yellow, K.ink),
-  (K.panel2, K.white),
-  (K.lime, K.ink),
-  (K.coral, K.ink),
-];
-
-/// Quick-launch buttons. Each one just types its command, so the user sees
-/// (and learns) what to write next time.
-const _apps = <(IconData, String, String)>[
-  (Icons.cancel_presentation, 'Открытые окна', 'windows'),
-  (Icons.public, 'Opera', 'opera'),
-  (Icons.local_fire_department, 'Streak', 'streak'),
-  (Icons.code, 'VS Code', 'vscode'),
-  (Icons.smart_toy_outlined, 'Claude Code', 'claude'),
-  (Icons.sports_esports_outlined, 'Unity Hub', 'unity'),
-  (Icons.terminal, 'CMD', 'cmd'),
-  (Icons.desktop_windows_outlined, 'Рабочий стол', 'desktop'),
-  (Icons.folder_open, 'Проводник', 'explorer'),
-  (Icons.download, 'Загрузки', 'downloads'),
-  (Icons.monitor_heart_outlined, 'Диспетчер задач', 'taskmgr'),
-];
-
-/// Explanation shown under the input while typing.
-const _hints = <String, String>{
-  'help': 'Покажет список всех команд',
-  'apps': 'Покажет все программы, которые можно открыть',
-  'open': 'open <программа или файл>  — например: open opera, open steam, open report.docx',
-  'windows': 'Покажет открытые окна с номерами — потом можно закрыть: close 3',
-  'close': 'close <программа или номер>  — как нажать ✕: close opera, close 3. '
-      'Если зависла: close force opera (несохранённое пропадёт)',
-  'kill': 'kill <программа>  — то же, что «close force»: без сохранения',
-  'projects': 'Покажет ваши папки и проекты с номерами',
-  'go': 'go <номер или название>  — зайти в папку проекта, например: go 10',
-  'files': 'Покажет, что лежит в текущей папке',
-  'folder': 'folder [номер]  — открыть папку в Проводнике на ноутбуке. Без номера — текущую',
-  'vscode': 'vscode <номер>  — открыть проект в VS Code. Без номера — просто открыть VS Code',
-  'claude': 'claude <номер>  — открыть Claude Code в окне на ноутбуке (работать с ним во вкладке «Экран»)',
-  'ask': 'ask <вопрос>  — Claude ответит прямо здесь и может менять файлы в текущей папке',
-  'new': 'new chat  — начать разговор с Claude заново',
-  'unity': 'unity <номер>  — открыть проект в Unity. Без номера — открыть Unity Hub',
-  'cd': 'cd <папка>  — перейти в папку (cd .. — на уровень выше)',
-  'dir': 'Список файлов (команда PowerShell). Проще: files',
-  'clear': 'Очистить экран терминала',
-  'opera': 'Откроет браузер Opera',
-  'streak': 'Откроет Streak',
-  'cmd': 'Откроет окно командной строки на ноутбуке в текущей папке',
-  'desktop': 'Откроет папку «Рабочий стол»',
-  'explorer': 'Откроет Проводник',
-  'downloads': 'Откроет папку «Загрузки»',
-  'taskmgr': 'Откроет Диспетчер задач',
-};
 
 class TerminalScreen extends StatefulWidget {
   final Api api;
@@ -111,11 +53,10 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
   String get _cwd => _s.cwd;
   bool get _busy => _s.busy;
   ScrollController get _scroll => _s.scroll;
-  final _hint = ValueNotifier<String>('');
   // Rebuilding the output on every key press made typing lag on phones:
   // the heavy parts are built once and reused until they really change.
-  Widget? _logCache, _appsCache, _cmdsCache;
-  int? _logKey, _appsKey, _cmdsKey;
+  Widget? _logCache, _chipsCache;
+  int? _logKey;
   bool _dockOpen = true;
   // keeps the input field the same widget while rows above it appear/disappear,
   // otherwise it is rebuilt and the phone keyboard closes after one letter
@@ -123,7 +64,6 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
   int _themeIdx = 0;
   double _fontSize = 14;
   int _monoFont = 0;
-  List<(String, String, bool)>? _pcApps; // every program on the PC, from the server
 
   @override
   bool get wantKeepAlive => true;
@@ -131,69 +71,100 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
   @override
   void initState() {
     super.initState();
-    _ctrl.addListener(_updateHint);
     _loadLook();
-    _loadApps();
   }
 
-  /// Commands shown in the carousel above the keyboard.
-  /// Ending with a space = needs a word after it, so it is only inserted.
-  static const _quick = [
-    'help', 'windows', 'close ', 'open ', 'projects', 'go ', 'files',
-    'folder', 'vscode ', 'claude ', 'ask ', 'unity', 'cd ..', 'apps', 'clear',
-  ];
-
-  Widget _cmdCarousel() {
-    final recent = _history.reversed.take(5).toList();
-    Widget chip(String label, {bool past = false}) => Padding(
-          padding: const EdgeInsets.only(right: 6),
-          child: Material(
-            color: _boxBg,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8), side: BorderSide(color: _boxLine)),
-            child: InkWell(
-              borderRadius: BorderRadius.circular(8),
-              onTap: () {
-                if (label.endsWith(' ')) {
-                  _insert(label); // needs a name/number after it
-                } else {
-                  _run(label);
-                }
-              },
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  Text(past ? '↺ ' : '› ', style: K.code(12.5, color: past ? _termFg.withValues(alpha: 0.5) : K.lime)),
-                  Text(label.trim(), style: K.code(12.5, color: _termFg, w: FontWeight.w700)),
-                  if (label.endsWith(' '))
-                    Text(' …', style: K.code(12.5, color: _termFg.withValues(alpha: 0.45))),
-                ]),
-              ),
-            ),
+  Widget _chipsRowCached() => _chipsCache ??= RepaintBoundary(
+        child: SizedBox(
+          height: 40,
+          child: ListView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            children: [
+              for (final chip in [
+                KChip('Новый терминал', icon: Icons.add_rounded, bg: K.lime, fg: K.ink, onTap: _newTerminal),
+                KChip('Claude Code', icon: Icons.auto_awesome_rounded, bg: _claudeColor, fg: K.ink, onTap: _newClaude),
+                KChip('Настройки терминала',
+                    icon: Icons.tune_rounded, bg: K.panel2, fg: K.white, onTap: _showTermSettings),
+              ])
+                Padding(padding: const EdgeInsets.only(right: 7, bottom: 4), child: chip),
+            ],
           ),
-        );
-    return TextFieldTapRegion(
-      child: SizedBox(
-        height: 32,
-        child: ListView(
-          scrollDirection: Axis.horizontal,
+        ),
+      );
+
+  // ------------------------------------------------------------ history / commands sheets
+  Widget _sheet(String title, String sub, List<Widget> rows) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.7,
+        maxChildSize: 0.95,
+        builder: (ctx, sc) => ListView(
+          controller: sc,
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 28),
           children: [
-            for (final c in recent) chip(c, past: true),
-            for (final c in _quick) chip(c),
+            Center(
+              child: Container(
+                  width: 44, height: 5, decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(3))),
+            ),
+            const SizedBox(height: 14),
+            Text(title, style: K.t(20, w: FontWeight.w700)),
+            const SizedBox(height: 4),
+            Text(sub, style: K.t(12.5, color: K.muted, w: FontWeight.w400, height: 1.4)),
+            const SizedBox(height: 10),
+            ...rows,
           ],
         ),
+      );
+
+  Widget _cmdRow(BuildContext ctx, String cmd, [String? what]) => InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: () {
+          Navigator.pop(ctx);
+          _insert(cmd);
+        },
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(cmd, style: K.code(13.5, color: K.lime, w: FontWeight.w700)),
+            if (what != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Text(what, style: K.t(12.5, color: Colors.white70, w: FontWeight.w400, height: 1.35)),
+              ),
+          ]),
+        ),
+      );
+
+  void _showHistory() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => _sheet(
+        'История команд',
+        _history.isEmpty ? 'Здесь появятся команды, которые вы выполняли.' : 'Нажмите — команда появится в строке ввода.',
+        [for (final c in _history.reversed) _cmdRow(ctx, c)],
       ),
     );
   }
 
-  void _updateHint() {
-    final t = _ctrl.text.trim().toLowerCase();
-    String h = '';
-    if (t.isNotEmpty) {
-      final first = t.split(' ').first;
-      h = _hints[first] ?? _hints.entries.firstWhere((e) => e.key.startsWith(t), orElse: () => const MapEntry('', '')).value;
-      if (h.isEmpty) h = 'Команда PowerShell. Напишите «help», чтобы увидеть простые команды';
-    }
-    _hint.value = h;
+  void _showCommands() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => _sheet(
+        'Команды PowerShell',
+        'Нажмите — команда появится в строке ввода. Слова в <скобках> замените своими.',
+        [
+          for (final (group, list) in _psCommands) ...[
+            Padding(
+              padding: const EdgeInsets.only(top: 14, bottom: 2),
+              child: Text(group, style: K.t(14, color: K.lilac, w: FontWeight.w700)),
+            ),
+            for (final (cmd, what) in list) _cmdRow(ctx, cmd, what),
+          ],
+        ],
+      ),
+    );
   }
 
   Future<void> _run(String cmd) async {
@@ -259,192 +230,6 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
     _insert(t);
   }
 
-  static final _mono = K.code(13);
-
-  // ------------------------------------------------------------ guide
-  void _showGuide() {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      builder: (ctx) => DraggableScrollableSheet(
-        expand: false,
-        initialChildSize: 0.85,
-        maxChildSize: 0.95,
-        builder: (ctx, sc) => ListView(
-          controller: sc,
-          padding: const EdgeInsets.fromLTRB(20, 8, 20, 32),
-          children: [
-            Center(
-              child: Container(width: 44, height: 5, decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2))),
-            ),
-            const SizedBox(height: 16),
-            Text('Как пользоваться', style: K.h(26)),
-            Text('терминалом', style: K.accent(26, color: K.lilac)),
-            const SizedBox(height: 8),
-            const Text(
-              'Пишите команду внизу и нажимайте ➤. Команды выполняются на ноутбуке, а ответ появляется здесь. '
-              'Пока открыт терминал, картинка экрана не передаётся — интернет почти не тратится.',
-              style: TextStyle(color: Colors.white70, height: 1.4),
-            ),
-            const SizedBox(height: 6),
-            const Text('Нажмите на любой пример — он появится в строке ввода.',
-                style: TextStyle(color: Colors.white38, fontSize: 13)),
-            _section('1. Открыть программу', [
-              ('opera', 'браузер Opera'),
-              ('streak', 'Streak'),
-              ('vscode', 'VS Code'),
-              ('cmd', 'командная строка'),
-              ('desktop', 'папка «Рабочий стол»'),
-              ('open steam', 'любая программа из меню «Пуск»'),
-              ('apps', 'весь список программ'),
-            ], ctx),
-            _section('Закрыть программу', [
-              ('windows', 'список открытых окон с номерами'),
-              ('close opera', 'закрыть, как крестиком ✕'),
-              ('close 3', 'закрыть окно №3 из списка «windows»'),
-              ('close force opera', 'если программа зависла (несохранённое пропадёт)'),
-            ], ctx),
-            _section('2. Папки и проекты', [
-              ('projects', 'список проектов с номерами'),
-              ('go 10', 'зайти в проект №10'),
-              ('files', 'что лежит в текущей папке'),
-              ('folder', 'открыть текущую папку в Проводнике'),
-              ('open README.md', 'открыть файл из текущей папки'),
-              ('cd ..', 'выйти на папку выше'),
-            ], ctx),
-            _section('3. Работа с проектом', [
-              ('vscode 10', 'открыть проект №10 в VS Code'),
-              ('claude 10', 'Claude Code в окне на ноутбуке (смотрите во вкладке «Экран»)'),
-              ('ask что делает этот проект?', 'Claude ответит прямо здесь'),
-              ('ask исправь ошибку в main.dart', 'Claude может менять файлы текущей папки'),
-              ('new chat', 'начать разговор с Claude заново'),
-            ], ctx),
-            _section('4. Unity', [
-              ('unity', 'открыть Unity Hub'),
-              ('unity 9', 'открыть проект №9 в Unity (в списке помечены [Unity])'),
-            ], ctx),
-            _section('5. Полезное', [
-              ('help', 'список всех команд'),
-              ('clear', 'очистить экран терминала'),
-              ('ipconfig', 'любая команда PowerShell тоже работает'),
-            ], ctx),
-            const SizedBox(height: 12),
-            const Text(
-              'Совет: вместо номера можно писать название — например «claude RemoteDesk». '
-              'Кнопка 🕘 возвращает прошлую команду. Кнопка «Проекты» сверху открывает список с готовыми действиями.',
-              style: TextStyle(color: Colors.white54, height: 1.4, fontSize: 13),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _section(String title, List<(String, String)> rows, BuildContext ctx) => Padding(
-        padding: const EdgeInsets.only(top: 20),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(title, style: K.t(15, w: FontWeight.w700, color: _blue)),
-          const SizedBox(height: 6),
-          for (final (cmd, what) in rows)
-            InkWell(
-              borderRadius: BorderRadius.circular(8),
-              onTap: () {
-                Navigator.pop(ctx);
-                _insert(cmd);
-              },
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 7, horizontal: 4),
-                child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                    decoration: BoxDecoration(color: K.ink, borderRadius: BorderRadius.circular(10)),
-                    child: Text(cmd, style: _mono.copyWith(color: _green)),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Padding(
-                      padding: const EdgeInsets.only(top: 3),
-                      child: Text(what, style: const TextStyle(color: Colors.white70, fontSize: 13)),
-                    ),
-                  ),
-                ]),
-              ),
-            ),
-        ]),
-      );
-
-  // ------------------------------------------------------------ projects
-  Future<void> _showProjects() async {
-    List<Place> list;
-    try {
-      list = await widget.api.places();
-    } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Ошибка: $e')));
-      return;
-    }
-    if (!mounted) return;
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      builder: (ctx) => DraggableScrollableSheet(
-        expand: false,
-        initialChildSize: 0.75,
-        maxChildSize: 0.95,
-        builder: (ctx, sc) => ListView(
-          controller: sc,
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
-          children: [
-            Row(children: [
-              Text('Папки и ', style: K.h(26)),
-              Text('проекты', style: K.accent(26, color: K.lilac)),
-            ]),
-            const SizedBox(height: 4),
-            const Text('Нажмите действие — в терминале будет видно, какая команда это делает.',
-                style: TextStyle(color: Colors.white54, fontSize: 13)),
-            const SizedBox(height: 8),
-            for (final p in list)
-              Container(
-                decoration: BoxDecoration(color: K.panel2, borderRadius: BorderRadius.circular(24)),
-                margin: const EdgeInsets.symmetric(vertical: 5),
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 14, 12, 12),
-                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Row(children: [
-                      Text('${p.n}  ', style: K.h(15, color: K.lilac)),
-                      Expanded(
-                        child: Text(p.name, style: K.t(15, w: FontWeight.w700), overflow: TextOverflow.ellipsis),
-                      ),
-                      if (p.unity)
-                        const KTag('UNITY', bg: K.yellow),
-                    ]),
-                    Text(p.path, style: const TextStyle(color: Colors.white38, fontSize: 11), overflow: TextOverflow.ellipsis),
-                    const SizedBox(height: 10),
-                    Wrap(spacing: 6, runSpacing: 6, children: [
-                      _act(ctx, 'Перейти', 'go ${p.n}'),
-                      _act(ctx, 'Проводник', 'folder ${p.n}'),
-                      _act(ctx, 'VS Code', 'vscode ${p.n}'),
-                      _act(ctx, 'Claude', 'claude ${p.n}'),
-                      if (p.unity) _act(ctx, 'Unity', 'unity ${p.n}'),
-                    ]),
-                  ]),
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _act(BuildContext ctx, String label, String cmd) => KChip(
-        label,
-        bg: label == 'Перейти' ? K.white : K.ink,
-        fg: label == 'Перейти' ? K.ink : K.white,
-        onTap: () {
-          Navigator.pop(ctx);
-          _run(cmd);
-        },
-      );
-
   // ------------------------------------------------------------ UI
   // ------------------------------------------------------------ terminal look (user can change it)
   _TermTheme get _t => _termThemes[_themeIdx.clamp(0, _termThemes.length - 1)];
@@ -477,15 +262,6 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
     await p.setInt('term_theme', _themeIdx);
     await p.setDouble('term_font', _fontSize);
     await p.setInt('term_mono', _monoFont);
-  }
-
-  Future<void> _loadApps() async {
-    try {
-      final list = await widget.api.apps();
-      if (mounted && list.isNotEmpty) setState(() => _pcApps = list);
-    } catch (_) {
-      // older server without the list — the built-in buttons stay
-    }
   }
 
   /// Opens one more terminal tab (like «+» in Windows Terminal).
@@ -685,24 +461,6 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
     return _logCache!;
   }
 
-  Widget _appsRowCached() {
-    final k = identityHashCode(_pcApps);
-    if (k != _appsKey || _appsCache == null) {
-      _appsKey = k;
-      _appsCache = RepaintBoundary(child: _appsRow());
-    }
-    return _appsCache!;
-  }
-
-  Widget _cmdsCached() {
-    final k = Object.hash(_history.length, _history.isEmpty ? '' : _history.last, _themeIdx);
-    if (k != _cmdsKey || _cmdsCache == null) {
-      _cmdsKey = k;
-      _cmdsCache = RepaintBoundary(child: _cmdCarousel());
-    }
-    return _cmdsCache!;
-  }
-
   Widget _logView() => SelectionArea(
         key: ValueKey(_s.id),
         child: ListView.builder(
@@ -745,60 +503,12 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
         ),
       );
 
-  IconData _appIcon(String name) {
-    final n = name.toLowerCase();
-    for (final (icon, label, _) in _apps) {
-      if (label.toLowerCase() == n) return icon;
-    }
-    return Icons.apps_rounded;
-  }
-
-  Widget _appsRow() {
-    final list = _pcApps ?? [for (final (_, label, cmd) in _apps) (label, cmd, true)];
-    // only the buttons on screen are built (there can be 100+ programs)
-    return SizedBox(
-      height: 40,
-      child: ListView.builder(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 10),
-        itemCount: list.length + 3,
-        itemBuilder: (_, i) {
-          final Widget chip;
-          if (i == 0) {
-            chip = KChip('Новый терминал', icon: Icons.add_rounded, bg: K.lime, fg: K.ink, onTap: _newTerminal);
-          } else if (i == 1) {
-            chip = KChip('Claude Code', icon: Icons.auto_awesome_rounded, bg: _claudeColor, fg: K.ink, onTap: _newClaude);
-          } else if (i == 2) {
-            chip = KChip('Настройки терминала',
-                icon: Icons.tune_rounded, bg: K.panel2, fg: K.white, onTap: _showTermSettings);
-          } else {
-            final (name, cmd, _) = list[i - 3];
-            final c = _chipColors[(i - 3) % _chipColors.length];
-            chip = KChip(name, icon: _appIcon(name), bg: c.$1, fg: c.$2, onTap: () => _run(cmd));
-          }
-          return Padding(padding: const EdgeInsets.only(right: 7, bottom: 4), child: chip);
-        },
-      ),
-    );
-  }
-
   Widget _inputBar(bool keyboard) => Container(
         decoration: BoxDecoration(color: _termBg, border: Border(top: BorderSide(color: _boxLine))),
         padding: const EdgeInsets.fromLTRB(0, 8, 0, 6),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          // program buttons right above the input
-          if (!keyboard) Padding(padding: const EdgeInsets.only(bottom: 6), child: _appsRowCached()),
-          // possible commands — always shown
-          Padding(padding: const EdgeInsets.fromLTRB(10, 0, 10, 6), child: _cmdsCached()),
-          ValueListenableBuilder<String>(
-            valueListenable: _hint,
-            builder: (_, hint, _) => hint.isEmpty
-                ? const SizedBox.shrink()
-                : Padding(
-                    padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
-                    child: Text(hint, style: K.t(12, color: _termFg.withValues(alpha: 0.6), height: 1.3)),
-                  ),
-          ),
+          // new terminal / Claude Code / settings right above the input
+          if (!keyboard) Padding(padding: const EdgeInsets.only(bottom: 6), child: _chipsRowCached()),
           GestureDetector(
             key: _inputKey,
             behavior: HitTestBehavior.translucent,
@@ -874,8 +584,8 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
                 bg: _termBg,
                 fg: _termFg,
                 fontSize: (_fontSize - 2).clamp(9, 20),
-                // the same chips as in the PowerShell tab: new terminal, Claude Code, programs
-                above: keyboard ? null : _appsRowCached(),
+                // the same chips as in the PowerShell tab: new terminal, Claude Code, settings
+                above: keyboard ? null : _chipsRowCached(),
               ),
             ),
           ] else ...[
@@ -888,10 +598,8 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
               tab: widget.tab,
               onTab: widget.onTab,
               actions: [
-                DockAction(Icons.folder_special_rounded, 'Проекты', _showProjects),
-                DockAction(Icons.help_rounded, 'Помощь', _showGuide),
-                DockAction(Icons.history_rounded, 'Прошлая', () => _histStep(-1)),
-                DockAction(Icons.delete_sweep_rounded, 'Очистить', () => setState(_log.clear)),
+                DockAction(Icons.history_rounded, 'История', _showHistory),
+                DockAction(Icons.list_alt_rounded, 'Команды', _showCommands),
                 DockAction(Icons.logout_rounded, 'Выйти', () => Navigator.of(context).pop()),
               ],
               expanded: _dockOpen,
@@ -910,6 +618,62 @@ class _TermTheme {
   final Color bg, fg, err;
   const _TermTheme(this.name, this.bg, this.fg, this.err);
 }
+
+/// Real PowerShell commands for the «Команды» list (nothing RemoteDesk-specific).
+const _psCommands = <(String, List<(String, String)>)>[
+  ('Папки и файлы', [
+    ('ls', 'что лежит в текущей папке (Get-ChildItem, dir)'),
+    ('cd <папка>', 'перейти в папку'),
+    ('cd ..', 'на папку выше'),
+    ('cd ~', 'в домашнюю папку'),
+    ('pwd', 'где я сейчас'),
+    ('mkdir <имя>', 'создать папку'),
+    ('ni <файл.txt>', 'создать пустой файл (New-Item)'),
+    ('cat <файл>', 'показать текст файла (Get-Content)'),
+    ('cp <откуда> <куда>', 'копировать (Copy-Item)'),
+    ('mv <откуда> <куда>', 'переместить (Move-Item)'),
+    ('ren <файл> <новое имя>', 'переименовать (Rename-Item)'),
+    ('rm <файл>', 'удалить (Remove-Item)'),
+    ('ls -Recurse -Filter *.txt', 'найти файлы по маске во всех вложенных папках'),
+    ('explorer .', 'открыть текущую папку в Проводнике'),
+  ]),
+  ('Программы и процессы', [
+    ('start <программа или файл>', 'запустить (Start-Process), например start notepad'),
+    ('Get-Process', 'запущенные процессы (ps)'),
+    ('Stop-Process -Name <имя>', 'завершить процесс (kill)'),
+    ('tasklist', 'список задач'),
+    ('taskkill /IM <имя.exe> /F', 'принудительно закрыть программу'),
+  ]),
+  ('Система и сеть', [
+    ('ipconfig', 'IP-адреса компьютера'),
+    ('ping <адрес>', 'проверить связь, например ping google.com'),
+    ('Test-NetConnection <адрес> -Port <порт>', 'открыт ли порт'),
+    ('hostname', 'имя компьютера'),
+    ('whoami', 'текущий пользователь'),
+    ('systeminfo', 'сведения о системе'),
+    ('Get-Date', 'дата и время'),
+    ('Get-PSDrive -PSProvider FileSystem', 'диски и свободное место'),
+    ('Get-Volume', 'тома дисков'),
+  ]),
+  ('Текст и вывод', [
+    ('echo <текст>', 'вывести текст (Write-Output)'),
+    ('<команда> | Select-String <слово>', 'найти строки со словом'),
+    ('<команда> | Out-File <файл.txt>', 'сохранить вывод в файл'),
+    ('cls', 'очистить экран (Clear-Host)'),
+  ]),
+  ('Справка', [
+    ('Get-Help <команда>', 'справка по команде (help)'),
+    ('Get-Command', 'все доступные команды'),
+    ('Get-History', 'история команд PowerShell'),
+  ]),
+  ('Разработка', [
+    ('git status', 'состояние репозитория'),
+    ('git pull', 'забрать изменения'),
+    ('python --version', 'версия Python'),
+    ('code .', 'открыть текущую папку в VS Code'),
+    ('winget search <название>', 'найти программу для установки'),
+  ]),
+];
 
 const _termThemes = [
   _TermTheme('Campbell', Color(0xFF0C0C0C), Color(0xFFCCCCCC), Color(0xFFF14C4C)),

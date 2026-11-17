@@ -84,8 +84,8 @@ class _RemoteScreenState extends State<RemoteScreen> {
   Size _viewport = Size.zero;
 
   // gestures
-  // everything works at once: tap = click, finger = scroll, hold = right click,
-  // hold + move = select text / drag, two fingers = zoom
+  // everything works at once: tap = click, double tap = double click, finger = scroll,
+  // hold = menu (copy / paste…), hold + move = select text / drag, two fingers = zoom
   bool _held = false; // the finger was held still: left button is down
   bool _full = false; // full screen, landscape, only the menu button
   bool _panelOpen = true; // the dock's button grid; collapsed = just the tabs
@@ -98,6 +98,11 @@ class _RemoteScreenState extends State<RemoteScreen> {
   bool _buttonDown = false;
   Timer? _longPress;
   Offset? _lastPos;
+  // menu after a long press (like the phone's own «Копировать / Вставить»)
+  Offset? _menuAt;
+  // double tap = double click: the second tap clicks exactly where the first one did
+  Offset? _tapPos;
+  DateTime _tapTime = DateTime(2000);
   // pinch
   double _pinchDist0 = 1;
   double _pinchScale0 = 1;
@@ -109,7 +114,6 @@ class _RemoteScreenState extends State<RemoteScreen> {
   final _kb = TextEditingController(text: _sentinel);
   String _kbPrev = _sentinel;
   static const _sentinel = '  ';
-  bool _showKeys = false;
   final Set<String> _mods = {};
   bool _kbSeen = false; // the phone keyboard has actually appeared since focusing
 
@@ -459,6 +463,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
     }
     _pointers.clear();
     _pointerSeen.clear();
+    _menuAt = null;
     _start = null;
     _held = false;
     _moved = false;
@@ -499,6 +504,13 @@ class _RemoteScreenState extends State<RemoteScreen> {
     }
     _pointers[e.pointer] = e.localPosition;
     _pointerSeen[e.pointer] = now;
+    if (_menuAt != null) {
+      // a touch outside the menu only closes it (as on the phone)
+      setState(() => _menuAt = null);
+      _start = null;
+      _consumed = true;
+      return;
+    }
     if (_pointers.length == 1) {
       _start = e.localPosition;
       _lastPos = e.localPosition;
@@ -508,7 +520,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
       _held = false;
       _longPress?.cancel();
       // finger held still: press the left button there; moving now selects text / drags,
-      // letting go without moving = right click (menu with «Копировать» etc.)
+      // letting go shows the menu «Копировать / Вставить…»
       _longPress = Timer(const Duration(milliseconds: 450), () {
         if (_pointers.length == 1 && !_moved) {
           _held = true;
@@ -586,9 +598,20 @@ class _RemoteScreenState extends State<RemoteScreen> {
     if (_buttonDown) {
       _send({'t': 'up', 'b': 'left'});
       _buttonDown = false;
-      if (_held && !_moved && e is PointerUpEvent) _click(_start!, button: 'right');
+      if (_held && e is PointerUpEvent) setState(() => _menuAt = _moved ? (_lastPos ?? _start!) : _start!);
     } else if (!_consumed && !_moved && _start != null && e is PointerUpEvent) {
-      if (DateTime.now().difference(_startTime).inMilliseconds < 550) _click(_start!);
+      final now = DateTime.now();
+      if (now.difference(_startTime).inMilliseconds < 550) {
+        final prev = _tapPos;
+        if (prev != null && now.difference(_tapTime).inMilliseconds < 450 && (prev - _start!).distance < 40) {
+          _click(prev); // second click on the same spot: Windows sees a double click
+          _tapPos = null;
+        } else {
+          _click(_start!);
+          _tapPos = _start;
+          _tapTime = now;
+        }
+      }
     }
     _start = null;
     _held = false;
@@ -703,7 +726,6 @@ class _RemoteScreenState extends State<RemoteScreen> {
                   // key carousel right above the phone keyboard
                   _kbCarousel()
                 else ...[
-                  if (_panelOpen && _showKeys) _keysPanel(),
                   KrakenDock(
                     tabs: homeTabs,
                     tab: widget.tab,
@@ -873,6 +895,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
                   ),
                 ),
               ),
+            if (_menuAt != null) _pressMenu(_menuAt!),
             if (_locked)
               Positioned.fill(
                 child: LockPanel(
@@ -925,12 +948,6 @@ class _RemoteScreenState extends State<RemoteScreen> {
   List<DockAction> _actions() => [
     DockAction(_sound ? Icons.volume_up_rounded : Icons.volume_off_rounded, 'Звук', _toggleSound, on: _sound),
     DockAction(Icons.keyboard_rounded, 'Клавиатура', _toggleKeyboard, on: _kbFocus.hasFocus),
-    DockAction(
-      Icons.keyboard_command_key_rounded,
-      'Клавиши',
-      () => setState(() => _showKeys = !_showKeys),
-      on: _showKeys,
-    ),
     DockAction(Icons.fullscreen_rounded, 'Весь экран', _toggleFull),
     DockAction(Icons.high_quality_rounded, _qualities[_quality].label, () {
       setState(() => _quality = (_quality + 1) % _qualities.length);
@@ -1009,58 +1026,55 @@ class _RemoteScreenState extends State<RemoteScreen> {
     );
   }
 
-  Widget _keysPanel() {
-    return Container(
-      margin: const EdgeInsets.fromLTRB(10, 6, 10, 0),
-      padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
-      decoration: BoxDecoration(
-        color: K.panel,
-        borderRadius: BorderRadius.circular(26),
-        border: Border.all(color: K.line),
-      ),
-      child: Column(
-        children: [
-          _row([
-            _mod('ctrl', 'Ctrl'),
-            _mod('alt', 'Alt'),
-            _mod('shift', 'Shift'),
-            _mod('win', 'Win'),
-            _chip('Esc', () => _key(['esc'])),
-            _chip('Tab', () => _key(['tab'])),
-            _chip('Enter', () => _key(['enter'])),
-            _chip('⌫', () => _key(['backspace'])),
-            _chip('Del', () => _key(['delete'])),
-            _chip('←', () => _key(['left'])),
-            _chip('↑', () => _key(['up'])),
-            _chip('↓', () => _key(['down'])),
-            _chip('→', () => _key(['right'])),
-            _chip('Home', () => _key(['home'])),
-            _chip('End', () => _key(['end'])),
-            _chip('PgUp', () => _key(['pageup'])),
-            _chip('PgDn', () => _key(['pagedown'])),
-            for (var i = 1; i <= 12; i++) _chip('F$i', () => _key(['f$i'])),
-          ]),
-          _row([
-            _chip('Пуск', () => _key(['win'])),
-            _chip('Копировать', () => _key(['ctrl', 'c'])),
-            _chip('Вставить', () => _key(['ctrl', 'v'])),
-            _chip('Вырезать', () => _key(['ctrl', 'x'])),
-            _chip('Отменить', () => _key(['ctrl', 'z'])),
-            _chip('Выделить всё', () => _key(['ctrl', 'a'])),
-            _chip('Сохранить', () => _key(['ctrl', 's'])),
-            _chip('Alt+Tab', () => _key(['alt', 'tab'])),
-            _chip('Закрыть окно', () => _key(['alt', 'f4'])),
-            _chip('Рабочий стол', () => _key(['win', 'd'])),
-            _chip('Проводник', () => _key(['win', 'e'])),
-            _chip('Выполнить', () => _key(['win', 'r'])),
-            _chip('Диспетчер задач', () => _key(['ctrl', 'shift', 'esc'])),
-            _chip('Смена языка', () => _key(['alt', 'shift'])),
-            _chip('🔉', () => _key(['volumedown'])),
-            _chip('🔊', () => _key(['volumeup'])),
-            _chip('🔇', () => _key(['volumemute'])),
-            _chip('⏯', () => _key(['mediaplay'])),
-          ]),
-        ],
+  /// Menu after a long press: the same actions as the PC's own menu, sent as key presses.
+  Widget _pressMenu(Offset at) {
+    void act(VoidCallback f) {
+      setState(() => _menuAt = null);
+      HapticFeedback.selectionClick();
+      f();
+    }
+
+    final items = <(String, VoidCallback)>[
+      ('Копировать', () => _key(['ctrl', 'c'])),
+      ('Вырезать', () => _key(['ctrl', 'x'])),
+      ('Вставить', () => _key(['ctrl', 'v'])),
+      ('Выделить всё', () => _key(['ctrl', 'a'])),
+      ('Правая кнопка', () => _click(at, button: 'right')),
+    ];
+    final maxW = math.max(120.0, _viewport.width - 16);
+    final top = at.dy - 62 < 8 ? at.dy + 28 : at.dy - 62;
+    return Positioned(
+      left: 8,
+      right: 8,
+      top: top,
+      child: Align(
+        alignment: Alignment(
+            _viewport.width <= 0 ? 0 : ((at.dx / _viewport.width) * 2 - 1).clamp(-1.0, 1.0), 0),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: maxW),
+          child: Material(
+            color: const Color(0xF22A2A2E),
+            elevation: 8,
+            shadowColor: Colors.black54,
+            borderRadius: BorderRadius.circular(12),
+            clipBehavior: Clip.antiAlias,
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                for (var i = 0; i < items.length; i++) ...[
+                  if (i > 0) Container(width: 1, height: 22, color: Colors.white24),
+                  InkWell(
+                    onTap: () => act(items[i].$2),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 12),
+                      child: Text(items[i].$1, style: K.t(13.5, w: FontWeight.w500)),
+                    ),
+                  ),
+                ],
+              ]),
+            ),
+          ),
+        ),
       ),
     );
   }

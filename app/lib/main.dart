@@ -1,5 +1,3 @@
-import 'dart:math' as math;
-
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -60,7 +58,6 @@ class _ConnectScreenState extends State<ConnectScreen> {
       _port.text = fromWeb ? '${Uri.base.port}' : (p.getString('port') ?? '8765');
       _key.text = p.getString('key') ?? '';
       deviceOverride = p.getString('device_model');
-      _models = deviceChoices();
     });
     // Opened from the QR code in the PC window: «http://pc:8765/?k=KEY» — log in at once.
     final k = kIsWeb ? (Uri.base.queryParameters['k'] ?? '') : '';
@@ -135,37 +132,6 @@ class _ConnectScreenState extends State<ConnectScreen> {
 
   bool _showKey = false;
 
-  /// Several iPhones have the same screen: the person picks theirs once (shown in the PC window).
-  List<String> _models = const [];
-
-  Future<void> _pickModel(String m) async {
-    setState(() => deviceOverride = m);
-    final p = await SharedPreferences.getInstance();
-    await p.setString('device_model', m);
-  }
-
-  Widget _modelPicker() => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        const SizedBox(height: 18),
-        Text('Какой у вас iPhone?', style: K.t(12, color: const Color(0xFFD6D6DC), w: FontWeight.w500)),
-        const SizedBox(height: 4),
-        Text('У этих моделей одинаковый экран — выберите свою, чтобы она правильно показывалась на компьютере.',
-            style: K.t(11, color: const Color(0xFF6E6E76), w: FontWeight.w400, height: 1.4)),
-        const SizedBox(height: 8),
-        Wrap(spacing: 6, runSpacing: 6, children: [
-          for (final m in _models)
-            ChoiceChip(
-              label: Text(m, style: K.t(12, color: deviceOverride == m ? K.ink : Colors.white, w: FontWeight.w500)),
-              selected: deviceOverride == m,
-              showCheckmark: false,
-              selectedColor: Colors.white,
-              backgroundColor: _field,
-              side: const BorderSide(color: Color(0xFF2E2E34)),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-              onSelected: (_) => _pickModel(m),
-            ),
-        ]),
-      ]);
-
   /// «Сканировать QR-код»: the code in the PC window holds the address, port and key —
   /// fill them in and connect at once.
   Future<void> _scanQr() async {
@@ -175,7 +141,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
     });
     String? text;
     try {
-      text = await scanQr();
+      text = await scanQr(context);
     } on FormatException {
       setState(() {
         _busy = false;
@@ -228,36 +194,6 @@ class _ConnectScreenState extends State<ConnectScreen> {
             borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Color(0xFF232328))),
         focusedBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: _accent, width: 1.4)),
-      );
-
-  Widget _photo({required bool wide}) => ClipRRect(
-        borderRadius: BorderRadius.circular(14),
-        child: Stack(fit: StackFit.expand, children: [
-          Image.asset('assets/images/login.jpg',
-              fit: BoxFit.cover, alignment: const Alignment(0, 0.35), filterQuality: FilterQuality.medium),
-          const DecoratedBox(
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-                colors: [Color(0x00000000), Color(0x00000000), Color(0xCC000000)],
-                stops: [0, 0.45, 1],
-              ),
-            ),
-          ),
-          Positioned(
-            left: 20,
-            right: 20,
-            bottom: wide ? 30 : 18,
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              Text('Терминал и экран ноутбука прямо с телефона.',
-                  textAlign: TextAlign.center, style: K.t(wide ? 17 : 15, w: FontWeight.w500, height: 1.4)),
-              const SizedBox(height: 12),
-              Text('RemoteDesk — удалённый доступ к вашему ПК.',
-                  textAlign: TextAlign.center, style: K.t(11.5, color: const Color(0xFF9A9AA2), w: FontWeight.w400)),
-            ]),
-          ),
-        ]),
       );
 
   Widget _form() => Column(crossAxisAlignment: CrossAxisAlignment.stretch, mainAxisSize: MainAxisSize.min, children: [
@@ -313,7 +249,6 @@ class _ConnectScreenState extends State<ConnectScreen> {
         const SizedBox(height: 10),
         Text('Ключ из 32 символов — или просто отсканируйте QR-код из окна программы. Дома используйте адрес 192.168.x.x, вне дома — адрес Tailscale 100.x.x.x.',
             style: K.t(11, color: const Color(0xFF6E6E76), w: FontWeight.w400, height: 1.45)),
-        if (_models.isNotEmpty) _modelPicker(),
         if (_error != null) ...[
           const SizedBox(height: 14),
           Text(_error!, style: K.t(12, color: K.coral, w: FontWeight.w500, height: 1.4)),
@@ -376,25 +311,10 @@ class _ConnectScreenState extends State<ConnectScreen> {
         color: Colors.black,
         borderRadius: BorderRadius.circular(18),
       ),
-      child: wide
-          ? SizedBox(
-              height: 560,
-              child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-                Expanded(child: _photo(wide: true)),
-                Expanded(
-                  child: Center(
-                    child: SingleChildScrollView(
-                      padding: const EdgeInsets.symmetric(horizontal: 56, vertical: 24),
-                      child: ConstrainedBox(constraints: const BoxConstraints(maxWidth: 360), child: _form()),
-                    ),
-                  ),
-                ),
-              ]),
-            )
-          : Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-              SizedBox(height: math.max(220, size.height * 0.34), child: _photo(wide: false)),
-              Padding(padding: const EdgeInsets.fromLTRB(16, 26, 16, 18), child: _form()),
-            ]),
+      child: Padding(
+        padding: wide ? const EdgeInsets.symmetric(horizontal: 40, vertical: 36) : const EdgeInsets.fromLTRB(16, 26, 16, 18),
+        child: _form(),
+      ),
     );
     return Scaffold(
       backgroundColor: Colors.black,
@@ -412,7 +332,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
           child: Center(
             child: SingleChildScrollView(
               padding: EdgeInsets.all(wide ? 32 : 10),
-              child: ConstrainedBox(constraints: BoxConstraints(maxWidth: wide ? 1000 : 480), child: card),
+              child: ConstrainedBox(constraints: BoxConstraints(maxWidth: wide ? 500 : 480), child: card),
             ),
           ),
         ),

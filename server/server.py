@@ -1214,12 +1214,8 @@ MARK = "__RD_CWD__"
 def run_command(cmd, cwd, timeout=120):
     if not cwd or not os.path.isdir(cwd):
         cwd = os.path.expanduser("~")
-    try:
-        easy = friendly(cmd, cwd)
-    except Exception as e:
-        easy = {"output": f"Ошибка: {e}", "cwd": cwd}
-    if easy is not None:
-        return easy
+    # every command goes to real PowerShell (the old easy commands — help, windows,
+    # projects, go… — are no longer intercepted; friendly() is kept unused)
     script = (
         "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
         "$OutputEncoding=[Text.Encoding]::UTF8;"
