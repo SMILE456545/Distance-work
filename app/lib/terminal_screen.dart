@@ -3,17 +3,20 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'api.dart';
+import 'claude/claude_term.dart';
 import 'kraken/kraken.dart';
 import 'main.dart' show homeTabs;
 
 /// One terminal tab: its own output, folder and scroll position.
+/// A Claude Code tab is a real console on the PC instead ([claude]).
 class _Session {
   final int id;
   final List<_Entry> log = [];
   String cwd;
   bool busy = false;
   final scroll = ScrollController();
-  _Session(this.id, this.cwd);
+  ClaudeSession? claude;
+  _Session(this.id, this.cwd, {this.claude});
 }
 
 class _Entry {
@@ -24,6 +27,7 @@ class _Entry {
   _Entry(this.cwd, this.cmd);
 }
 
+const _claudeColor = Color(0xFFD97757); // Claude's orange
 const _green = K.lime;
 const _blue = K.lilac;
 
@@ -226,7 +230,17 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
 
   void _insert(String text) {
     _ctrl.value = TextEditingValue(text: text, selection: TextSelection.collapsed(offset: text.length));
-    _focus.requestFocus();
+    _openKeyboard();
+  }
+
+  /// iPhone Safari can hide the keyboard while the field stays focused, and then a tap on
+  /// the field does nothing. Ask for the keyboard explicitly every time.
+  void _openKeyboard() {
+    if (_focus.hasFocus) {
+      SystemChannels.textInput.invokeMethod<void>('TextInput.show');
+    } else {
+      _focus.requestFocus();
+    }
   }
 
   void _toBottom() {
@@ -483,7 +497,25 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
     });
   }
 
+  /// Opens Claude Code (exactly as in Windows Terminal) in the folder of the current tab.
+  void _newClaude() {
+    FocusManager.instance.primaryFocus?.unfocus();
+    setState(() {
+      _tabs.add(_Session(++_tabSeq, _cwd, claude: ClaudeSession(widget.api, _cwd)));
+      _tab = _tabs.length - 1;
+    });
+  }
+
+  @override
+  void dispose() {
+    for (final t in _tabs) {
+      t.claude?.kill();
+    }
+    super.dispose();
+  }
+
   void _closeTab(int i) {
+    _tabs[i].claude?.kill();
     setState(() {
       _tabs.removeAt(i).scroll.dispose();
       if (_tabs.isEmpty) _tabs.add(_Session(++_tabSeq, widget.info.home));
@@ -516,11 +548,15 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
                       borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
                     ),
                     child: Row(children: [
-                      Icon(Icons.terminal_rounded, size: 15, color: _termFg.withValues(alpha: i == _tab ? 1 : 0.6)),
+                      Icon(_tabs[i].claude != null ? Icons.auto_awesome_rounded : Icons.terminal_rounded,
+                          size: 15,
+                          color: _tabs[i].claude != null
+                              ? _claudeColor.withValues(alpha: i == _tab ? 1 : 0.7)
+                              : _termFg.withValues(alpha: i == _tab ? 1 : 0.6)),
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
-                          'Windows PowerShell',
+                          _tabs[i].claude != null ? 'Claude Code' : 'Windows PowerShell',
                           overflow: TextOverflow.ellipsis,
                           style: K.t(12.5,
                               color: _termFg.withValues(alpha: i == _tab ? 1 : 0.6),
@@ -725,17 +761,19 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
       child: ListView.builder(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: 10),
-        itemCount: list.length + 2,
+        itemCount: list.length + 3,
         itemBuilder: (_, i) {
           final Widget chip;
           if (i == 0) {
             chip = KChip('Новый терминал', icon: Icons.add_rounded, bg: K.lime, fg: K.ink, onTap: _newTerminal);
           } else if (i == 1) {
+            chip = KChip('Claude Code', icon: Icons.auto_awesome_rounded, bg: _claudeColor, fg: K.ink, onTap: _newClaude);
+          } else if (i == 2) {
             chip = KChip('Настройки терминала',
                 icon: Icons.tune_rounded, bg: K.panel2, fg: K.white, onTap: _showTermSettings);
           } else {
-            final (name, cmd, _) = list[i - 2];
-            final c = _chipColors[(i - 2) % _chipColors.length];
+            final (name, cmd, _) = list[i - 3];
+            final c = _chipColors[(i - 3) % _chipColors.length];
             chip = KChip(name, icon: _appIcon(name), bg: c.$1, fg: c.$2, onTap: () => _run(cmd));
           }
           return Padding(padding: const EdgeInsets.only(right: 7, bottom: 4), child: chip);
@@ -761,8 +799,11 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
                     child: Text(hint, style: K.t(12, color: _termFg.withValues(alpha: 0.6), height: 1.3)),
                   ),
           ),
-          Container(
+          GestureDetector(
             key: _inputKey,
+            behavior: HitTestBehavior.translucent,
+            onTap: _openKeyboard, // the whole input line, the «PS C:\\…>» part too
+            child: Container(
             margin: const EdgeInsets.symmetric(horizontal: 10),
             padding: const EdgeInsets.fromLTRB(12, 2, 2, 2),
             decoration: BoxDecoration(
@@ -793,6 +834,7 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
                     autocorrect: false,
                     enableSuggestions: false,
                     textInputAction: TextInputAction.send,
+                    onTap: _openKeyboard,
                     onSubmitted: (t) {
                       _run(t);
                       _focus.requestFocus();
@@ -810,7 +852,7 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
                 onPressed: _busy ? null : () => _run(_ctrl.text),
               ),
             ]),
-          ),
+          )),
         ]),
       );
 
@@ -824,8 +866,22 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
         bottom: false,
         child: Column(children: [
           _tabStrip(),
-          Expanded(child: RepaintBoundary(child: _logViewCached())),
-          _inputBar(keyboard),
+          if (_s.claude != null) ...[
+            Expanded(
+              child: ClaudeView(
+                key: ValueKey(_s.id),
+                session: _s.claude!,
+                bg: _termBg,
+                fg: _termFg,
+                fontSize: (_fontSize - 2).clamp(9, 20),
+                // the same chips as in the PowerShell tab: new terminal, Claude Code, programs
+                above: keyboard ? null : _appsRowCached(),
+              ),
+            ),
+          ] else ...[
+            Expanded(child: RepaintBoundary(child: _logViewCached())),
+            _inputBar(keyboard),
+          ],
           if (!keyboard)
             KrakenDock(
               tabs: homeTabs,

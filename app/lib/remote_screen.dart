@@ -10,9 +10,9 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'api.dart';
 import 'kraken/kraken.dart';
 import 'main.dart' show homeTabs;
+import 'screen/fullscreen.dart';
+import 'screen/lock_panel.dart';
 import 'sound/unlock.dart';
-
-enum TouchMode { direct, touchpad }
 
 class _Quality {
   final String label;
@@ -27,6 +27,7 @@ const _qualities = [
   _Quality('Эконом', 960, 45, 20, 1200000),
   _Quality('Норма', 1366, 60, 30, 3000000),
   _Quality('Высокое', 1920, 75, 30, 6000000),
+  _Quality('Максимум', 1920, 85, 60, 16000000), // games: full size, 60 frames
 ];
 
 class RemoteScreen extends StatefulWidget {
@@ -83,11 +84,13 @@ class _RemoteScreenState extends State<RemoteScreen> {
   Size _viewport = Size.zero;
 
   // gestures
-  TouchMode _mode = TouchMode.direct;
-  bool _dragLock = false;
-  bool _scrollMode = false;
+  // everything works at once: tap = click, finger = scroll, hold = right click,
+  // hold + move = select text / drag, two fingers = zoom
+  bool _held = false; // the finger was held still: left button is down
+  bool _full = false; // full screen, landscape, only the menu button
   bool _panelOpen = true; // the dock's button grid; collapsed = just the tabs
   final Map<int, Offset> _pointers = {};
+  final Map<int, DateTime> _pointerSeen = {}; // last down/move of each finger
   Offset? _start;
   DateTime _startTime = DateTime.now();
   bool _moved = false;
@@ -108,6 +111,29 @@ class _RemoteScreenState extends State<RemoteScreen> {
   static const _sentinel = '  ';
   bool _showKeys = false;
   final Set<String> _mods = {};
+  bool _kbSeen = false; // the phone keyboard has actually appeared since focusing
+
+  // Windows lock screen: a PIN field is shown over the picture
+  bool _locked = false;
+  bool _unlockAgent = false;
+  Timer? _lockTimer;
+  AppLifecycleListener? _life;
+
+  Future<void> _checkLock() async {
+    if (!mounted || !widget.active) return;
+    try {
+      final (locked, agent) = await widget.api.lockState();
+      if (mounted && (locked != _locked || agent != _unlockAgent)) {
+        if (locked && _kbFocus.hasFocus) _closeKeyboard();
+        setState(() {
+          _locked = locked;
+          _unlockAgent = agent;
+        });
+      }
+    } catch (_) {
+      // an older server without /api/lock, or no connection: just no panel
+    }
+  }
 
   MonitorInfo get _mon => widget.info.monitors[_monitor.clamp(0, widget.info.monitors.length - 1)];
 
@@ -115,7 +141,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
   void initState() {
     super.initState();
     // video adapts to the connection by itself; the picture stream needs a lighter start far away
-    _quality = 1;
+    _quality = _qualities.length - 1; // maximum speed and quality
     _fpsTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted && !_rtcOn && _fps != _framesThisSecond) setState(() => _fps = _framesThisSecond);
       _framesThisSecond = 0;
@@ -123,6 +149,10 @@ class _RemoteScreenState extends State<RemoteScreen> {
     _kbFocus.addListener(() {
       if (mounted) setState(() {});
     });
+    _checkLock();
+    _lockTimer = Timer.periodic(const Duration(seconds: 3), (_) => _checkLock());
+    // leaving Safari mid-touch loses the «finger up»
+    _life = AppLifecycleListener(onHide: _resetGesture, onShow: _resetGesture);
     _renderer.initialize().then((_) {
       _renderer.onResize = () {
         if (mounted && _renderer.videoWidth > 0 && !_rtcOn) {
@@ -144,6 +174,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
     super.didUpdateWidget(old);
     if (old.active == widget.active) return;
     if (widget.active) {
+      _checkLock();
       if (_pc == null && !_rtcFailed) {
         _startRtc();
       } else {
@@ -152,6 +183,8 @@ class _RemoteScreenState extends State<RemoteScreen> {
     } else {
       // the Terminal tab is open — don't spend mobile traffic on the picture
       _dcSend({'t': 'pause'});
+      if (_kbFocus.hasFocus) _closeKeyboard();
+      _resetGesture();
     }
   }
 
@@ -163,7 +196,10 @@ class _RemoteScreenState extends State<RemoteScreen> {
     _pc?.close();
     _renderer.dispose();
     _fpsTimer?.cancel();
+    _lockTimer?.cancel();
+    _life?.dispose();
     _longPress?.cancel();
+    if (_full) exitFullscreen();
     _kbFocus.dispose();
     _kb.dispose();
     super.dispose();
@@ -398,12 +434,35 @@ class _RemoteScreenState extends State<RemoteScreen> {
   // ------------------------------------------------------------ sending
   void _send(Map<String, dynamic> ev) {
     ev['m'] = _monitor;
-    // over the video connection events skip HTTP requests entirely
-    if (_dc != null) {
-      _dcSend(ev);
-    } else {
-      _input.add(ev);
+    // over the video connection events skip HTTP requests entirely;
+    // a channel that silently died (Safari in background, network hiccup) must not
+    // swallow the input — then it goes over HTTP
+    final dc = _dc;
+    if (dc != null && dc.state == RTCDataChannelState.RTCDataChannelOpen) {
+      try {
+        dc.send(RTCDataChannelMessage(jsonEncode(ev)));
+        return;
+      } catch (_) {
+        if (identical(_dc, dc)) _dc = null;
+      }
     }
+    _input.add(ev);
+  }
+
+  /// Forget all touches (a lost «finger up» left a ghost finger: every new touch
+  /// was taken for a two-finger zoom and the cursor stopped moving).
+  void _resetGesture() {
+    _longPress?.cancel();
+    if (_buttonDown) {
+      _send({'t': 'up', 'b': 'left'});
+      _buttonDown = false;
+    }
+    _pointers.clear();
+    _pointerSeen.clear();
+    _start = null;
+    _held = false;
+    _moved = false;
+    _consumed = false;
   }
 
   Map<String, dynamic> _at(String t, Offset p, [Map<String, dynamic>? extra]) {
@@ -411,13 +470,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
     return {'t': t, 'x': n.dx, 'y': n.dy, ...?extra};
   }
 
-  void _click(Offset p, {String button = 'left'}) {
-    if (_mode == TouchMode.direct) {
-      _send(_at('click', p, {'b': button}));
-    } else {
-      _send({'t': 'click', 'b': button});
-    }
-  }
+  void _click(Offset p, {String button = 'left'}) => _send(_at('click', p, {'b': button}));
 
   // ------------------------------------------------------------ pointer handling
   void _onDown(PointerDownEvent e) {
@@ -434,19 +487,35 @@ class _RemoteScreenState extends State<RemoteScreen> {
       _send(_at('down', e.localPosition, {'b': b}));
       return;
     }
+    // iOS sometimes never reports a finger lifting (system gesture, notification,
+    // keyboard, edge of the screen). Fingers silent for a while are ghosts — drop them.
+    final now = DateTime.now();
+    final ghosts = _pointerSeen.entries
+        .where((p) => now.difference(p.value).inMilliseconds > 1200)
+        .map((p) => p.key)
+        .toList();
+    if (ghosts.isNotEmpty) {
+      _resetGesture();
+    }
     _pointers[e.pointer] = e.localPosition;
+    _pointerSeen[e.pointer] = now;
     if (_pointers.length == 1) {
       _start = e.localPosition;
       _lastPos = e.localPosition;
       _startTime = DateTime.now();
       _moved = false;
       _consumed = false;
+      _held = false;
       _longPress?.cancel();
-      _longPress = Timer(const Duration(milliseconds: 550), () {
-        if (_pointers.length == 1 && !_moved && !_dragLock) {
-          _consumed = true;
+      // finger held still: press the left button there; moving now selects text / drags,
+      // letting go without moving = right click (menu with «Копировать» etc.)
+      _longPress = Timer(const Duration(milliseconds: 450), () {
+        if (_pointers.length == 1 && !_moved) {
+          _held = true;
           HapticFeedback.mediumImpact();
-          _click(_start!, button: 'right');
+          _send(_at('move', _start!));
+          _send({'t': 'down', 'b': 'left'});
+          _buttonDown = true;
         }
       });
     } else if (_pointers.length == 2) {
@@ -471,6 +540,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
     }
     if (!_pointers.containsKey(e.pointer)) return;
     _pointers[e.pointer] = e.localPosition;
+    _pointerSeen[e.pointer] = DateTime.now();
 
     if (_pointers.length >= 2) {
       final pts = _pointers.values.toList();
@@ -488,26 +558,17 @@ class _RemoteScreenState extends State<RemoteScreen> {
     if (!_moved && (e.localPosition - _start!).distance > 8) {
       _moved = true;
       _longPress?.cancel();
-      if (_dragLock) {
-        if (_mode == TouchMode.direct) _send(_at('move', _start!));
-        _send({'t': 'down', 'b': 'left'});
-        _buttonDown = true;
-      }
     }
     if (!_moved) return;
-    if (_scrollMode && !_dragLock) {
-      // finger up/down scrolls the page under the finger (like on a phone)
-      final delta = e.localPosition - (_lastPos ?? e.localPosition);
-      if (_lastPos == _start && _mode == TouchMode.direct) _send(_at('move', _start!));
-      final dy = (delta.dy * 6).round();
-      if (dy != 0) _send({'t': 'scroll', 'dy': dy, 'dx': 0});
-    } else if (_mode == TouchMode.direct) {
+    if (_held) {
+      // held, then moved: the button is down — select text / drag
       _send(_at('move', e.localPosition));
     } else {
+      // plain swipe scrolls the page under the finger (like on a phone)
       final delta = e.localPosition - (_lastPos ?? e.localPosition);
-      final k = _mon.width / (_fitted.width * _scale) * 1.6;
-      final dx = (delta.dx * k).round(), dy = (delta.dy * k).round();
-      if (dx != 0 || dy != 0) _send({'t': 'rel', 'dx': dx, 'dy': dy});
+      if (_lastPos == _start) _send(_at('move', _start!));
+      final dy = (delta.dy * 6).round(), dx = (-delta.dx * 6).round();
+      if (dy != 0 || dx != 0) _send({'t': 'scroll', 'dy': dy, 'dx': dx});
     }
     _lastPos = e.localPosition;
   }
@@ -518,16 +579,19 @@ class _RemoteScreenState extends State<RemoteScreen> {
       _send(_at('up', e.localPosition, {'b': 'left'}));
       return;
     }
-    _pointers.remove(e.pointer);
+    _pointerSeen.remove(e.pointer);
+    if (_pointers.remove(e.pointer) == null) return; // already dropped as a ghost
     if (_pointers.isNotEmpty) return;
     _longPress?.cancel();
     if (_buttonDown) {
       _send({'t': 'up', 'b': 'left'});
       _buttonDown = false;
+      if (_held && !_moved && e is PointerUpEvent) _click(_start!, button: 'right');
     } else if (!_consumed && !_moved && _start != null && e is PointerUpEvent) {
       if (DateTime.now().difference(_startTime).inMilliseconds < 550) _click(_start!);
     }
     _start = null;
+    _held = false;
   }
 
   void _onSignal(PointerSignalEvent e) {
@@ -540,14 +604,44 @@ class _RemoteScreenState extends State<RemoteScreen> {
   // ------------------------------------------------------------ keyboard
   void _toggleKeyboard() {
     if (_kbFocus.hasFocus) {
-      _kbFocus.unfocus();
+      _closeKeyboard();
     } else {
-      _kb.value = const TextEditingValue(text: _sentinel, selection: TextSelection.collapsed(offset: 2));
-      _kbPrev = _sentinel;
-      _kbFocus.requestFocus();
-      SystemChannels.textInput.invokeMethod('TextInput.show');
+      _openKeyboard();
     }
+  }
+
+  void _openKeyboard() {
+    _kb.value = const TextEditingValue(text: _sentinel, selection: TextSelection.collapsed(offset: 2));
+    _kbPrev = _sentinel;
+    _kbSeen = false;
+    if (_kbFocus.hasFocus) {
+      // focused but the phone hid its keyboard — reconnect so the browser shows it again
+      _kbFocus.unfocus();
+    }
+    _kbFocus.requestFocus();
+    SystemChannels.textInput.invokeMethod('TextInput.show');
     setState(() {});
+  }
+
+  void _closeKeyboard() {
+    _kbSeen = false;
+    _kbFocus.unfocus();
+    SystemChannels.textInput.invokeMethod('TextInput.hide');
+    setState(() {});
+  }
+
+  /// The phone keyboard was closed by the system (swipe down, «Готово»…) while the
+  /// hidden field kept focus — drop the focus so the dock comes back.
+  void _watchKeyboard(double inset) {
+    if (!_kbFocus.hasFocus) return;
+    if (inset > 80) {
+      _kbSeen = true;
+    } else if (_kbSeen) {
+      _kbSeen = false;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _kbFocus.hasFocus && MediaQuery.viewInsetsOf(context).bottom <= 80) _closeKeyboard();
+      });
+    }
   }
 
   void _onKbChanged(String v) {
@@ -594,6 +688,8 @@ class _RemoteScreenState extends State<RemoteScreen> {
   // ------------------------------------------------------------ UI
   @override
   Widget build(BuildContext context) {
+    _watchKeyboard(MediaQuery.viewInsetsOf(context).bottom);
+    if (_full) return _fullView();
     return Container(
       color: K.ink,
       child: SafeArea(
@@ -625,6 +721,51 @@ class _RemoteScreenState extends State<RemoteScreen> {
         ),
       ),
     );
+  }
+
+  /// Full screen: the picture fills a landscape screen, only the menu button stays.
+  /// If the phone is held upright (iPhone Safari can't turn the page), the picture is turned.
+  Widget _fullView() {
+    final size = MediaQuery.sizeOf(context);
+    final view = Stack(
+      children: [
+        Positioned.fill(child: _screen()),
+        Positioned(
+          left: 12,
+          top: 12,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: _toggleFull,
+            child: Container(
+              width: 42,
+              height: 42,
+              decoration: BoxDecoration(color: K.ink.withValues(alpha: 0.55), shape: BoxShape.circle),
+              child: const Icon(Icons.menu_rounded, color: Colors.white, size: 22),
+            ),
+          ),
+        ),
+      ],
+    );
+    return Container(
+      color: Colors.black,
+      child: Stack(
+        children: [
+          Positioned.fill(child: size.height > size.width ? RotatedBox(quarterTurns: 1, child: view) : view),
+          Positioned(left: 0, bottom: 0, width: 2, height: 2, child: _hiddenField()),
+        ],
+      ),
+    );
+  }
+
+  void _toggleFull() {
+    if (_kbFocus.hasFocus) _closeKeyboard();
+    _resetGesture();
+    setState(() {
+      _full = !_full;
+      _scale = 1;
+      _offset = Offset.zero;
+    });
+    _full ? enterFullscreen() : exitFullscreen();
   }
 
   Widget _hiddenField() => Opacity(
@@ -721,8 +862,8 @@ class _RemoteScreenState extends State<RemoteScreen> {
             // status only while connecting / offline: anything over the running video slows the browser
             if (!_rtcOn || _offline)
               Positioned(
-                left: 10,
-                top: 10,
+                left: _full ? 64 : 10,
+                top: _full ? 20 : 10,
                 child: IgnorePointer(
                   child: _badge(
                     _offline
@@ -730,6 +871,14 @@ class _RemoteScreenState extends State<RemoteScreen> {
                         : '${widget.info.name} · $_fps к/с${_rtcOn ? ' · видео' : ''}${_scale > 1 ? ' · ×${_scale.toStringAsFixed(1)}' : ''}',
                     _offline,
                   ),
+                ),
+              ),
+            if (_locked)
+              Positioned.fill(
+                child: LockPanel(
+                  api: widget.api,
+                  agent: _unlockAgent,
+                  onUnlocked: () => setState(() => _locked = false),
                 ),
               ),
           ],
@@ -782,42 +931,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
       () => setState(() => _showKeys = !_showKeys),
       on: _showKeys,
     ),
-    DockAction(
-      _mode == TouchMode.direct ? Icons.touch_app_rounded : Icons.mouse_rounded,
-      _mode == TouchMode.direct ? 'Касание' : 'Тачпад',
-      () {
-        setState(() => _mode = _mode == TouchMode.direct ? TouchMode.touchpad : TouchMode.direct);
-        _snack(
-          _mode == TouchMode.direct
-              ? 'Касание: нажимайте прямо на нужное место'
-              : 'Тачпад: водите пальцем, курсор двигается как на ноутбуке',
-        );
-      },
-    ),
-    DockAction(Icons.pan_tool_alt_rounded, 'Тянуть', () {
-      setState(() => _dragLock = !_dragLock);
-      _snack(_dragLock ? 'Перетаскивание включено: ведите пальцем, чтобы тянуть' : 'Перетаскивание выключено');
-    }, on: _dragLock),
-    DockAction(Icons.swap_vert_rounded, 'Прокрутка', () {
-      setState(() {
-        _scrollMode = !_scrollMode;
-        if (_scrollMode) _dragLock = false;
-      });
-      _snack(
-        _scrollMode
-            ? 'Прокрутка: ведите пальцем вверх/вниз, чтобы листать. Нажатия работают как обычно'
-            : 'Прокрутка выключена',
-      );
-    }, on: _scrollMode),
-    DockAction(Icons.ads_click_rounded, 'ПКМ', () => _send({'t': 'click', 'b': 'right'})),
-    DockAction(
-      Icons.zoom_out_map_rounded,
-      '1:1',
-      () => setState(() {
-        _scale = 1;
-        _offset = Offset.zero;
-      }),
-    ),
+    DockAction(Icons.fullscreen_rounded, 'Весь экран', _toggleFull),
     DockAction(Icons.high_quality_rounded, _qualities[_quality].label, () {
       setState(() => _quality = (_quality + 1) % _qualities.length);
       _sendQuality();
@@ -864,6 +978,8 @@ class _RemoteScreenState extends State<RemoteScreen> {
         color: K.ink,
         padding: const EdgeInsets.symmetric(vertical: 6),
         child: _row([
+          _chip('⌨ Клавиатура', _openKeyboard),
+          _chip('✕ Скрыть', _closeKeyboard),
           _chip('Enter ⏎', () => _key(['enter'])),
           _chip('⌫', () => _key(['backspace'])),
           _chip('Esc', () => _key(['esc'])),

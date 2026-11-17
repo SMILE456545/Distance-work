@@ -59,7 +59,7 @@ def _encode_frame(self, frame, force_keyframe):
         c.framerate = fractions.Fraction(h264.MAX_FRAME_RATE, 1)
         c.time_base = fractions.Fraction(1, h264.MAX_FRAME_RATE)
         c.options = {
-            "preset": "superfast",
+            "preset": "ultrafast" if h264.MAX_FRAME_RATE >= 50 else "superfast",  # 60 fps for games
             "tune": "zerolatency",
             # VBV keeps every frame small enough not to clog the connection
             "x264-params": f"vbv-maxrate={self.target_bitrate // 1000}:"
@@ -336,6 +336,8 @@ class RtcHub:
         self.paused = False
         self.sound = True  # the phone can mute PC sound (and save traffic)
         self.resumed = None
+        self.peer_ip = None    # who watches (set by the server when the phone asks for video)
+        self.dc_bytes = 0      # taps/keys received over the data channel
         threading.Thread(target=self._run, daemon=True, name="rtc").start()
 
     def _run(self):
@@ -352,7 +354,7 @@ class RtcHub:
             self.fps = max(5, min(60, int(cfg["fps"])))
             h264.MAX_FRAME_RATE = self.fps
         if "br" in cfg:
-            h264.MAX_BITRATE = max(500_000, min(12_000_000, int(cfg["br"])))
+            h264.MAX_BITRATE = max(500_000, min(20_000_000, int(cfg["br"])))
 
     def _set_paused(self, paused):
         self.paused = paused
@@ -362,6 +364,7 @@ class RtcHub:
             self.resumed.set()
 
     def _on_message(self, msg):
+        self.dc_bytes += len(msg)
         try:
             data = json.loads(msg)
         except ValueError:
@@ -390,6 +393,7 @@ class RtcHub:
         for old in list(self.pcs):
             await old.close()
         self.pcs.clear()
+        self.dc_bytes = 0
         _PIN["host"] = primary_ip()
         self.set_quality(offer)
         self._set_paused(False)
@@ -439,6 +443,38 @@ class RtcHub:
                     out.insert(i, line)
                     break
         return "\r\n".join(out)
+
+    async def _stats(self):
+        sent = recv = 0
+        live = False
+        for pc in list(self.pcs):
+            live = live or pc.connectionState == "connected"
+            for st in (await pc.getStats()).values():
+                t = getattr(st, "type", "")
+                if t == "outbound-rtp":
+                    sent += getattr(st, "bytesSent", 0) or 0
+                elif t == "inbound-rtp":
+                    recv += getattr(st, "bytesReceived", 0) or 0
+        return live, sent, recv + self.dc_bytes
+
+    def stats(self):
+        """(peer ip, live, bytes sent, bytes received) of the current video connection."""
+        if not self.pcs:
+            return self.peer_ip, False, 0, 0
+        try:
+            live, sent, recv = asyncio.run_coroutine_threadsafe(self._stats(), self.loop).result(3)
+        except Exception:
+            return self.peer_ip, False, 0, 0
+        return self.peer_ip, live, sent, recv
+
+    def drop(self):
+        """Close the video of the device that was turned off in the PC window."""
+        async def close_all():
+            for pc in list(self.pcs):
+                self.pcs.discard(pc)
+                await pc.close()
+        asyncio.run_coroutine_threadsafe(close_all(), self.loop)
+        self.peer_ip = None
 
     def answer(self, offer, timeout=20):
         return asyncio.run_coroutine_threadsafe(self._answer(offer), self.loop).result(timeout)

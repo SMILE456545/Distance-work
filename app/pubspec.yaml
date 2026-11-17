@@ -38,6 +38,11 @@ dependencies:
   shared_preferences: ^2.5.6
   flutter_webrtc: ^1.6.3
   web: ^1.1.1
+  zxing2: ^0.2.4
+  # patched copy (fix for wrong letters, see packages/xterm/lib/src/ui/paragraph_cache.dart)
+  xterm:
+    path: packages/xterm
+  file_picker: ^10.3.10
 
 dev_dependencies:
   flutter_test:
@@ -121,3 +126,10 @@ flutter:
           weight: 400
         - asset: assets/fonts/JetBrainsMono-700.ttf
           weight: 700
+    # Claude Code's symbols (⏺ ✻ ✳ ✓ …) that JetBrains Mono lacks; Noto, OFL, cut to those blocks
+    - family: TermSymbols
+      fonts:
+        - asset: assets/fonts/TermSymbols-Regular.ttf
+    - family: TermMath
+      fonts:
+        - asset: assets/fonts/TermMath-Regular.ttf

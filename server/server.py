@@ -26,6 +26,9 @@ import struct
 import mss
 from PIL import Image, ImageChops, ImageDraw
 
+import unlock
+import pty_win
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 # Packed into RemoteDesk.exe: the phone app is inside the exe, and settings (the key) live in
 # %APPDATA%\RemoteDesk so every person who runs the exe gets their own key.
@@ -45,10 +48,13 @@ user32 = ctypes.windll.user32
 KEY_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"  # no 0/O, 1/I/L — easy to type
 
 
+KEY_LEN = 32
+
+
 def new_key():
-    """16 characters ≈ 80 bits: can't be guessed even without the lockout below."""
-    raw = "".join(secrets.choice(KEY_ALPHABET) for _ in range(16))
-    return "-".join(raw[i:i + 4] for i in range(0, 16, 4))
+    """32 characters ≈ 158 bits (typed once — after that the QR code in the PC window logs in)."""
+    raw = "".join(secrets.choice(KEY_ALPHABET) for _ in range(KEY_LEN))
+    return "-".join(raw[i:i + 4] for i in range(0, KEY_LEN, 4))
 
 
 def save_config(cfg):
@@ -64,8 +70,8 @@ def load_config():
                 cfg = json.load(f)
         except Exception:
             cfg = {}
-    # the old 8-digit key is fine for Wi-Fi at home, not for the internet
-    if len(cfg.get("key", "")) < 16:
+    # older, shorter keys are replaced by a 32-character one
+    if len(cfg.get("key", "").replace("-", "")) < KEY_LEN:
         cfg["key"] = new_key()
     cfg.setdefault("port", PORT)
     cfg.setdefault("domain", "")          # e.g. mydesk.duckdns.org
@@ -761,6 +767,146 @@ def ask_claude(text, cwd):
     return out or err or "[пустой ответ]"
 
 
+# ---------------------------------------------------------------- real consoles (Claude Code on the phone)
+PTYS = pty_win.Sessions()
+UPLOAD_DIR = os.path.join(HOME, "Downloads", "RemoteDesk")
+UPLOAD_MAX = 500 * 1024 * 1024
+
+
+def pty_start(data):
+    cwd = str(data.get("cwd") or HOME)
+    if not os.path.isdir(cwd):
+        cwd = HOME
+    cols = max(20, min(400, int(data.get("cols", 80))))
+    rows = max(5, min(200, int(data.get("rows", 24))))
+    kind = data.get("kind", "claude")
+    if kind == "claude":
+        exe = claude_exe()
+        if not os.path.exists(exe):
+            raise RuntimeError("Claude Code не найден на компьютере (claude.exe)")
+        cmdline, title = f'"{exe}"', "Claude Code"
+    else:
+        cmdline, title = "powershell.exe -NoLogo", "Windows PowerShell"
+    p = PTYS.start(cmdline, cwd, cols, rows, title,
+                   env={"COLORTERM": "truecolor", "TERM": "xterm-256color"})
+    log(f"  [>] консоль «{title}» в {cwd}")
+    return {"id": p.id, "title": title, "cwd": cwd}
+
+
+def save_upload(name, rfile, length):
+    """A file sent from the phone goes to Downloads/RemoteDesk; returns the full path."""
+    if length <= 0 or length > UPLOAD_MAX:
+        raise RuntimeError("Файл пустой или больше 500 МБ")
+    name = os.path.basename(name.replace("\\", "/")).strip() or "file"
+    name = "".join("_" if c in r'<>:"/\|?*' or ord(c) < 32 or c == " " else c for c in name)[:120]
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    stem, ext = os.path.splitext(name)
+    path, n = os.path.join(UPLOAD_DIR, name), 1
+    while os.path.exists(path):
+        n += 1
+        path = os.path.join(UPLOAD_DIR, f"{stem}_{n}{ext}")
+    left = length
+    with open(path + ".part", "wb") as f:
+        while left > 0:
+            chunk = rfile.read(min(left, 1 << 20))
+            if not chunk:
+                break
+            f.write(chunk)
+            left -= len(chunk)
+    if left:
+        os.remove(path + ".part")
+        raise RuntimeError("Файл пришёл не полностью")
+    os.replace(path + ".part", path)
+    log(f"  [↓] файл с телефона: {path}")
+    TRANSFERS.add("sent", os.path.basename(path), length, path)
+    return path
+
+
+# ---------------------------------------------------------------- file exchange: history, PC folders, download
+class Transfers:
+    """What the phone sent to the PC and what it took from the PC (newest first, kept in transfers.json)."""
+    FILE = os.path.join(HERE, "transfers.json")
+    LIMIT = 300
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        try:
+            with open(self.FILE, encoding="utf-8") as f:
+                self.items = json.load(f)
+        except Exception:
+            self.items = []
+
+    def add(self, kind, name, size, path):
+        with self.lock:
+            now = time.time()
+            # Safari asks for the same file a few times (range requests) — that is one download
+            if kind == "recv" and any(i["kind"] == kind and i["path"] == path and now - i["time"] < 120
+                                      for i in self.items[:20]):
+                return
+            self.items.insert(0, {"kind": kind, "name": name, "size": size, "path": path, "time": now})
+            del self.items[self.LIMIT:]
+            try:
+                with open(self.FILE, "w", encoding="utf-8") as f:
+                    json.dump(self.items, f, ensure_ascii=False)
+            except Exception:
+                pass
+
+    def list(self):
+        with self.lock:
+            return [dict(i, exists=os.path.isfile(i["path"])) for i in self.items]
+
+    def clear(self, kind):
+        with self.lock:
+            self.items = [i for i in self.items if kind and i["kind"] != kind]
+            try:
+                with open(self.FILE, "w", encoding="utf-8") as f:
+                    json.dump(self.items, f, ensure_ascii=False)
+            except Exception:
+                pass
+
+
+TRANSFERS = Transfers()
+
+
+def fs_roots():
+    roots = [("Рабочий стол", DESKTOP), ("Загрузки", os.path.join(HOME, "Downloads")),
+             ("Документы", os.path.join(HOME, "Documents")), ("Изображения", os.path.join(HOME, "Pictures")),
+             ("Видео", os.path.join(HOME, "Videos")), ("Музыка", os.path.join(HOME, "Music")),
+             ("С телефона", UPLOAD_DIR), ("Папка пользователя", HOME)]
+    out = [{"name": n, "path": p, "dir": True} for n, p in roots if os.path.isdir(p)]
+    for d in "CDEFGH":
+        if os.path.isdir(d + ":\\"):
+            out.append({"name": f"Диск {d}:", "path": d + ":\\", "dir": True})
+    return out
+
+
+def fs_list(path):
+    """Folders first, then files; hidden and system entries are skipped."""
+    if not path:
+        return {"path": "", "parent": None, "items": fs_roots()}
+    path = os.path.abspath(path)
+    if not os.path.isdir(path):
+        raise RuntimeError("Папка не найдена")
+    items = []
+    with os.scandir(path) as it:
+        for e in it:
+            try:
+                st = e.stat()
+                attrs = getattr(st, "st_file_attributes", 0)
+                if attrs & 0x6 or e.name.startswith(("$", "~$")) or e.name.lower() in ("desktop.ini", "thumbs.db"):
+                    continue
+                isdir = e.is_dir()
+                items.append({"name": e.name, "path": e.path, "dir": isdir,
+                              "size": 0 if isdir else st.st_size, "time": st.st_mtime})
+            except OSError:
+                continue
+    items.sort(key=lambda i: (not i["dir"], i["name"].lower()))
+    parent = os.path.dirname(path.rstrip("\\/"))
+    if not parent or parent == path or len(path) <= 3:
+        parent = ""
+    return {"path": path, "parent": parent, "items": items}
+
+
 # ---------------------------------------------------------------- open windows / closing
 kernel32 = ctypes.windll.kernel32
 dwmapi = ctypes.windll.dwmapi
@@ -1123,16 +1269,127 @@ def static_body(path, st, gz):
     return data
 
 
+# ---------------------------------------------------------------- connected devices
+class Devices:
+    """Who is connected (for the PC window): address, model from the app's X-Device header
+    («phone; iPhone 15 Pro»), traffic of the HTTP requests and when it connected."""
+
+    IDLE = 60  # seconds without requests (and without live video) = gone
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.by_ip = {}
+        self.kicked = set()  # turned off in the PC window: refused until the phone logs in again
+
+    def kick(self, ip):
+        with self.lock:
+            self.kicked.add(ip)
+            self.by_ip.pop(ip, None)
+        print(f"  [-] {time.strftime('%H:%M')} устройство {ip} отключено")
+        if RTC and RTC.peer_ip == ip:
+            RTC.drop()
+
+    def is_kicked(self, ip, login):
+        with self.lock:
+            if ip in self.kicked and login:
+                self.kicked.discard(ip)  # the user connected again on the phone on purpose
+            return ip in self.kicked
+
+    @staticmethod
+    def _parse(tag, ua):
+        kind, _, model = (tag or "").partition(";")
+        kind, model = kind.strip(), model.split(";")[0].strip()  # «phone; iPhone 15; 393x852@3»
+        if kind not in ("phone", "tablet", "laptop"):
+            if "iPhone" in ua:
+                kind, model = "phone", "iPhone"
+            elif "iPad" in ua:
+                kind, model = "tablet", "iPad"
+            elif "Android" in ua or "Dart/" in ua:
+                kind, model = "phone", "Android"
+            else:
+                kind, model = "laptop", "Компьютер"
+        return kind, model[:40] or "Устройство"
+
+    def seen(self, ip, tag, ua):
+        now = time.time()
+        kind, model = self._parse(tag, ua or "")
+        with self.lock:
+            d = self.by_ip.get(ip)
+            if not d or now - d["last"] > self.IDLE:
+                d = self.by_ip[ip] = {"ip": ip, "since": now, "sent": 0, "recv": 0}
+                print(f"  [i] устройство {ip}: X-Device «{tag}» · {ua}")
+            d.update(last=now, kind=kind, model=model)
+
+    def traffic(self, ip, sent, recv):
+        with self.lock:
+            d = self.by_ip.get(ip)
+            if d:
+                d["sent"] += sent
+                d["recv"] += recv
+
+    def snapshot(self, live_ips=()):
+        """Connected devices, newest first. live_ips = addresses with live WebRTC video."""
+        now = time.time()
+        with self.lock:
+            for ip in live_ips:
+                if ip in self.by_ip:
+                    self.by_ip[ip]["last"] = now
+            out = [dict(d) for d in self.by_ip.values() if now - d["last"] <= self.IDLE]
+        return sorted(out, key=lambda d: -d["since"])
+
+
+DEVICES = Devices()
+
+
+class _Counted:
+    """Wraps the request's socket file to count bytes (traffic per device)."""
+
+    def __init__(self, f):
+        self.f, self.n = f, 0
+
+    def read(self, *a):
+        b = self.f.read(*a)
+        self.n += len(b)
+        return b
+
+    def readline(self, *a):
+        b = self.f.readline(*a)
+        self.n += len(b)
+        return b
+
+    def write(self, b):
+        self.n += len(b)
+        return self.f.write(b)
+
+    def __getattr__(self, name):
+        return getattr(self.f, name)
+
+
 # ---------------------------------------------------------------- http
 class Handler(BaseHTTPRequestHandler):
     server_version = "RemoteDesk/1.0"
+
+    def setup(self):
+        super().setup()
+        self.rfile, self.wfile = _Counted(self.rfile), _Counted(self.wfile)
+
+    def handle_one_request(self):
+        try:
+            super().handle_one_request()
+        finally:
+            if self.wfile.n or self.rfile.n:
+                try:
+                    DEVICES.traffic(self._ip(), self.wfile.n, self.rfile.n)
+                except Exception:
+                    pass
+                self.wfile.n = self.rfile.n = 0
 
     def log_message(self, fmt, *args):
         pass
 
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Key")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Key, X-Device, X-Login")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 
     def _json(self, obj, code=200):
@@ -1162,8 +1419,12 @@ class Handler(BaseHTTPRequestHandler):
             return "".join(k.split()).replace("-", "").upper().encode()
         key = self.headers.get("X-Key") or q.get("key", [""])[0]
         ok = secrets.compare_digest(norm(key), norm(CFG["key"]))
+        if ok and DEVICES.is_kicked(ip, self.headers.get("X-Login") == "1"):
+            self._json({"error": "Компьютер отключил это устройство", "kicked": True}, 403)
+            return False
         if ok:
             GUARD.ok(ip)
+            DEVICES.seen(ip, self.headers.get("X-Device", ""), self.headers.get("User-Agent", ""))
         else:
             GUARD.fail(ip, urlparse(self.path).path, key)
             self._json({"error": "неверный ключ"}, 401)
@@ -1187,6 +1448,24 @@ class Handler(BaseHTTPRequestHandler):
                     "monitors": [{"width": m["width"], "height": m["height"]} for m in mons],
                     "home": os.path.expanduser("~"),
                 })
+            if u.path == "/api/pty/read":
+                try:
+                    p = PTYS.get(q.get("id", [""])[0])
+                except KeyError as e:
+                    return self._json({"error": str(e), "gone": True}, 404)
+                text, end, exited = p.read(int(q.get("after", ["0"])[0]), wait=20.0)
+                return self._json({"data": text, "end": end, "exited": exited})
+            if u.path == "/api/lock":
+                return self._json(unlock.state())
+            if u.path == "/api/files/list":
+                try:
+                    return self._json(fs_list(q.get("path", [""])[0]))
+                except Exception as e:
+                    return self._json({"error": str(e)}, 400)
+            if u.path == "/api/files/get":
+                return self._send_file(q.get("path", [""])[0])
+            if u.path == "/api/transfers":
+                return self._json(TRANSFERS.list())
             if u.path == "/api/places":
                 return self._json(places())
             if u.path == "/api/apps":
@@ -1232,6 +1511,63 @@ class Handler(BaseHTTPRequestHandler):
                 return
             return self._json({"error": "not found"}, 404)
         self._static(u.path)
+
+    def _send_file(self, path):
+        """A PC file for the phone: Safari saves it to «Файлы» (Content-Disposition: attachment).
+        Range requests are answered, so big videos and resumed downloads work."""
+        path = os.path.abspath(path) if path else ""
+        if not path or not os.path.isfile(path):
+            return self._json({"error": "Файл не найден"}, 404)
+        size = os.path.getsize(path)
+        start, end, code = 0, size - 1, 200
+        rng = self.headers.get("Range", "")
+        if rng.startswith("bytes="):
+            a, _, b = rng[6:].split(",")[0].strip().partition("-")
+            try:
+                if a:
+                    start, end = int(a), (int(b) if b else size - 1)
+                elif b:
+                    start = max(0, size - int(b))
+                end = min(end, size - 1)
+                code = 206
+            except ValueError:
+                pass
+            if start > end:
+                self.send_response(416)
+                self._cors()
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+        name = os.path.basename(path)
+        from urllib.parse import quote
+        ascii_name = "".join(c if 32 <= ord(c) < 127 and c not in '"\\' else "_" for c in name)
+        self.send_response(code)
+        self._cors()
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Disposition",
+                         f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(name)}")
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(end - start + 1))
+        if code == 206:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+        if start == 0:
+            TRANSFERS.add("recv", name, size, path)
+            log(f"  [↑] файл на телефон: {path}")
+        left = end - start + 1
+        try:
+            with open(path, "rb") as f:
+                f.seek(start)
+                while left > 0:
+                    chunk = f.read(min(left, 1 << 20))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    left -= len(chunk)
+        except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
+            pass
 
     def _static(self, path):
         if not os.path.isdir(WEB_DIR):
@@ -1279,20 +1615,47 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authed(q):
             return
         n = int(self.headers.get("Content-Length") or 0)
+        if u.path == "/api/upload":
+            try:
+                return self._json({"path": save_upload(q.get("name", ["file"])[0], self.rfile, n)})
+            except Exception as e:
+                return self._json({"error": str(e)}, 400)
         try:
             data = json.loads(self.rfile.read(n) or b"{}")
         except Exception:
             return self._json({"error": "bad json"}, 400)
         try:
+            if u.path == "/api/transfers/clear":
+                TRANSFERS.clear(str(data.get("kind") or ""))
+                return self._json({"ok": True})
             if u.path == "/api/input":
                 for ev in (data if isinstance(data, list) else [data]):
                     handle_input(ev)
                 return self._json({"ok": True})
+            if u.path == "/api/pty/start":
+                return self._json(pty_start(data))
+            if u.path in ("/api/pty/write", "/api/pty/resize", "/api/pty/kill"):
+                sid = str(data.get("id", ""))
+                if u.path == "/api/pty/kill":
+                    PTYS.kill(sid)
+                    return self._json({"ok": True})
+                try:
+                    p = PTYS.get(sid)
+                except KeyError as e:
+                    return self._json({"error": str(e), "gone": True}, 404)
+                if u.path == "/api/pty/write":
+                    p.write(str(data.get("data", "")))
+                else:
+                    p.resize(int(data.get("cols", 80)), int(data.get("rows", 24)))
+                return self._json({"ok": True})
+            if u.path == "/api/unlock":
+                return self._json(unlock.unlock(str(data.get("pin", ""))))
             if u.path == "/api/cmd":
                 return self._json(run_command(data.get("cmd", ""), data.get("cwd", "")))
             if u.path == "/api/rtc":
                 if RTC is None:
                     return self._json({"error": "видео WebRTC недоступно: " + RTC_ERROR}, 501)
+                RTC.peer_ip = self._ip()
                 return self._json(RTC.answer(data))
         except Exception as e:
             return self._json({"error": str(e)}, 500)

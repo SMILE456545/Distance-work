@@ -4,11 +4,19 @@ import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
+import 'device/device.dart';
+
 class ApiError implements Exception {
   final String message;
   ApiError(this.message);
   @override
   String toString() => message;
+}
+
+/// The console on the PC was closed (or the server restarted).
+class PtyGone implements Exception {
+  @override
+  String toString() => 'Сессия закрыта';
 }
 
 class MonitorInfo {
@@ -87,14 +95,17 @@ class Api {
   Uri _u(String path, [Map<String, String>? q]) =>
       Uri(scheme: secure ? 'https' : 'http', host: host, port: port, path: path, queryParameters: q);
 
-  Map<String, String> get _headers => {'X-Key': key, 'Content-Type': 'application/json'};
+  /// «phone; iPhone 15 Pro» — the PC window shows who is connected.
+  String get _device => deviceTag(); // a model picked on the connect page counts at once
+
+  Map<String, String> get _headers => {'X-Key': key, 'X-Device': _device, 'Content-Type': 'application/json'};
 
   void close() => _client.close();
 
   Future<ServerInfo> info() async {
     final sw = Stopwatch()..start();
     final r = await _client
-        .get(_u('/api/info'), headers: _headers)
+        .get(_u('/api/info'), headers: {..._headers, 'X-Login': '1'}) // only the connect page calls it
         .timeout(const Duration(seconds: 5));
     rttMs = sw.elapsedMilliseconds;
     _check(r);
@@ -110,7 +121,7 @@ class Api {
     final r = await _client
         .get(
           _u('/api/frame', {'m': '$monitor', 'w': '$width', 'q': '$quality', 'last': last}),
-          headers: {'X-Key': key},
+          headers: {'X-Key': key, 'X-Device': _device},
         )
         .timeout(const Duration(seconds: 8));
     if (r.statusCode == 204) return null;
@@ -131,7 +142,7 @@ class Api {
             'q': '$quality',
             if (keyframe) 'kf': '1',
           }),
-          headers: {'X-Key': key},
+          headers: {'X-Key': key, 'X-Device': _device},
         )
         .timeout(const Duration(seconds: 10));
     if (r.statusCode == 204) return null;
@@ -164,6 +175,122 @@ class Api {
     return jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
   }
 
+  // ---- real consoles on the PC (Claude Code as in Windows Terminal)
+
+  /// Starts a program in its own console on the PC; returns (id, title, folder).
+  Future<(String, String, String)> ptyStart({required String cwd, required int cols, required int rows,
+      String kind = 'claude'}) async {
+    final r = await _client
+        .post(_u('/api/pty/start'),
+            headers: _headers, body: jsonEncode({'cwd': cwd, 'cols': cols, 'rows': rows, 'kind': kind}))
+        .timeout(const Duration(seconds: 20));
+    _check(r);
+    final j = jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
+    return (j['id'] as String, j['title'] as String, j['cwd'] as String);
+  }
+
+  /// Output after character [after]; the server waits up to 20 s for something new.
+  /// Returns (text, new position, the program ended). Throws [PtyGone] when closed.
+  Future<(String, int, bool)> ptyRead(String id, int after) async {
+    final r = await _client
+        .get(_u('/api/pty/read', {'id': id, 'after': '$after'}), headers: _headers)
+        .timeout(const Duration(seconds: 35));
+    if (r.statusCode == 404) throw PtyGone();
+    _check(r);
+    final j = jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
+    return (j['data'] as String, j['end'] as int, j['exited'] as bool);
+  }
+
+  Future<void> ptyWrite(String id, String data) async {
+    final r = await _client
+        .post(_u('/api/pty/write'), headers: _headers, body: jsonEncode({'id': id, 'data': data}))
+        .timeout(const Duration(seconds: 10));
+    if (r.statusCode == 404) throw PtyGone();
+    _check(r);
+  }
+
+  Future<void> ptyResize(String id, int cols, int rows) async {
+    final r = await _client
+        .post(_u('/api/pty/resize'), headers: _headers, body: jsonEncode({'id': id, 'cols': cols, 'rows': rows}))
+        .timeout(const Duration(seconds: 10));
+    if (r.statusCode == 404) return;
+    _check(r);
+  }
+
+  Future<void> ptyKill(String id) async {
+    try {
+      await _client
+          .post(_u('/api/pty/kill'), headers: _headers, body: jsonEncode({'id': id}))
+          .timeout(const Duration(seconds: 10));
+    } catch (_) {}
+  }
+
+  /// Sends a file from the phone; it lands in Downloads\RemoteDesk on the PC.
+  /// Returns the full path on the PC.
+  Future<String> upload(String name, Uint8List bytes) async {
+    final r = await _client
+        .post(_u('/api/upload', {'name': name}),
+            headers: {'X-Key': key, 'X-Device': _device, 'Content-Type': 'application/octet-stream'},
+            body: bytes)
+        .timeout(const Duration(minutes: 10));
+    _check(r);
+    return (jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>)['path'] as String;
+  }
+
+  /// One PC folder (path '' = the start list: Desktop, Downloads, disks…).
+  Future<PcFolder> listFiles(String path) async {
+    final r = await _client
+        .get(_u('/api/files/list', {'path': path}), headers: _headers)
+        .timeout(const Duration(seconds: 15));
+    _check(r);
+    final m = jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
+    return PcFolder(
+      m['path'] as String? ?? '',
+      m['parent'] as String?,
+      [for (final i in m['items'] as List) PcEntry.fromJson(i as Map<String, dynamic>)],
+    );
+  }
+
+  /// Link the browser opens to save a PC file on the phone (the key goes in the link:
+  /// a download started by the browser can't send headers).
+  String downloadUrl(String path) => _u('/api/files/get', {'path': path, 'key': key}).toString();
+
+  /// Everything sent to the PC and taken from it, newest first.
+  Future<List<Transfer>> transfers() async {
+    final r = await _client.get(_u('/api/transfers'), headers: _headers).timeout(const Duration(seconds: 10));
+    _check(r);
+    return [
+      for (final i in jsonDecode(utf8.decode(r.bodyBytes)) as List) Transfer.fromJson(i as Map<String, dynamic>)
+    ];
+  }
+
+  /// kind: 'sent', 'recv' or '' (both).
+  Future<void> clearTransfers(String kind) async {
+    final r = await _client
+        .post(_u('/api/transfers/clear'), headers: _headers, body: jsonEncode({'kind': kind}))
+        .timeout(const Duration(seconds: 10));
+    _check(r);
+  }
+
+  /// Is Windows on the lock screen, and is the unlock helper installed on the PC.
+  Future<(bool locked, bool agent)> lockState() async {
+    final r = await _client.get(_u('/api/lock'), headers: _headers).timeout(const Duration(seconds: 5));
+    _check(r);
+    final j = jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
+    return (j['locked'] as bool? ?? false, j['agent'] as bool? ?? false);
+  }
+
+  /// Types the PIN / password on the PC's lock screen. Returns null when Windows opened,
+  /// otherwise the reason.
+  Future<String?> unlock(String pin) async {
+    final r = await _client
+        .post(_u('/api/unlock'), headers: _headers, body: jsonEncode({'pin': pin}))
+        .timeout(const Duration(seconds: 50));
+    _check(r);
+    final j = jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
+    return j['ok'] == true ? null : (j['error'] as String? ?? 'Не получилось');
+  }
+
   /// All programs on the PC: (name, command to open it, is one of the main ones).
   Future<List<(String, String, bool)>> apps() async {
     final r = await _client.get(_u('/api/apps'), headers: _headers).timeout(const Duration(seconds: 15));
@@ -183,8 +310,19 @@ class Api {
     ];
   }
 
+  /// Set by the connect page: the PC turned this device off → back to the connect page.
+  static void Function(String message)? onKicked;
+
   void _check(http.Response r) {
     if (r.statusCode == 401) throw ApiError('Неверный ключ доступа');
+    if (r.statusCode == 403) {
+      String msg = 'Компьютер отключил это устройство';
+      try {
+        msg = (jsonDecode(utf8.decode(r.bodyBytes)) as Map)['error'] as String;
+      } catch (_) {}
+      onKicked?.call(msg);
+      throw ApiError(msg);
+    }
     if (r.statusCode == 429) {
       String msg = 'Слишком много неверных ключей — доступ временно закрыт';
       try {
@@ -200,6 +338,40 @@ class Api {
       throw ApiError(msg);
     }
   }
+}
+
+class PcEntry {
+  final String name, path;
+  final bool dir;
+  final int size;
+  final double time;
+  const PcEntry(this.name, this.path, this.dir, this.size, this.time);
+  factory PcEntry.fromJson(Map<String, dynamic> m) => PcEntry(m['name'] as String, m['path'] as String,
+      m['dir'] as bool? ?? false, (m['size'] as num?)?.toInt() ?? 0, (m['time'] as num?)?.toDouble() ?? 0);
+}
+
+class PcFolder {
+  final String path;
+  final String? parent; // '' = back to the start list, null = this is the start list
+  final List<PcEntry> items;
+  const PcFolder(this.path, this.parent, this.items);
+}
+
+/// One file sent to the PC ('sent') or taken from it ('recv').
+class Transfer {
+  final String kind, name, path;
+  final int size;
+  final DateTime time;
+  final bool exists;
+  const Transfer(this.kind, this.name, this.path, this.size, this.time, this.exists);
+  factory Transfer.fromJson(Map<String, dynamic> m) => Transfer(
+        m['kind'] as String,
+        m['name'] as String,
+        m['path'] as String,
+        (m['size'] as num?)?.toInt() ?? 0,
+        DateTime.fromMillisecondsSinceEpoch((((m['time'] as num?) ?? 0) * 1000).round()),
+        m['exists'] as bool? ?? true,
+      );
 }
 
 /// Sends input events one request at a time, merging mouse moves so the

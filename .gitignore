@@ -15,3 +15,12 @@ server/access.log
 # exe builds (published as GitHub Releases, not in git)
 release/*.exe
 release/build/work/
+release/build/work-unlock/
+release/RemoteDesk/
+release/*.zip
+server/remotedesk.log
+release/staging/
+release/staging_build.log
+release/build/work-setup/
+server/transfers.json
+server/update/

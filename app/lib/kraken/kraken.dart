@@ -404,9 +404,13 @@ class KrakenDock extends StatelessWidget {
           if (expanded && actions.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 6, bottom: 8),
-              child: Wrap(children: [
-                for (final a in actions) SizedBox(width: w, child: _ActionCell(a, labeled: true)),
-              ]),
+              // full width, so a short row starts in the first column like the tabs below it
+              child: SizedBox(
+                width: c.maxWidth,
+                child: Wrap(children: [
+                  for (final a in actions) SizedBox(width: w, child: _ActionCell(a, labeled: true)),
+                ]),
+              ),
             ),
           Row(children: bottom),
         ]);
